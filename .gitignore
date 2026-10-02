@@ -153,6 +153,12 @@ activemq-data/
 .venv
 env/
 venv/
+
+# Local secrets and SDK diagnostics
+.env_dir_backup/
+*.env.bak
+webull_*_sdk.log
+webull_*_sdk.log.*
 ENV/
 env.bak/
 venv.bak/

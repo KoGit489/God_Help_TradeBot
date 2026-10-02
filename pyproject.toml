@@ -7,7 +7,7 @@ name = "god-help-tradebot"
 version = "0.1.0"
 description = "Paper-safe foundations for a Webull trading bot."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["webull-openapi-python-sdk>=3.0.2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

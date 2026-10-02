@@ -57,6 +57,7 @@ class PaperBroker:
         self.realized_pnl = Decimal("0")
         self.positions: dict[str, Position] = {}
         self.orders: dict[int, PaperOrder] = {}
+        self.last_quotes: dict[str, Quote] = {}
         self._next_order_id = 1
 
     def submit_order(
@@ -102,7 +103,25 @@ class PaperBroker:
         target = self.submit_order(symbol, OrderSide.SELL, quantity, OrderType.LIMIT, limit_price=target_price)
         return stop, target
 
+    def get_positions(self) -> dict[str, Position]:
+        return dict(self.positions)
+
+    def get_position(self, symbol: str) -> Position | None:
+        return self.positions.get(symbol.upper())
+
+    def get_latest_quote(self, symbol: str) -> Quote | None:
+        return self.last_quotes.get(symbol.upper())
+
+    def cancel_order(self, order_id: int) -> PaperOrder | None:
+        order = self.orders.get(order_id)
+        if order is None:
+            return None
+        if order.status is OrderStatus.OPEN:
+            order.status = OrderStatus.CANCELED
+        return order
+
     def process_quote(self, quote: Quote) -> list[PaperOrder]:
+        self.last_quotes[quote.symbol.upper()] = quote
         filled: list[PaperOrder] = []
         for order in list(self.orders.values()):
             if order.status is not OrderStatus.OPEN or order.symbol != quote.symbol.upper():
