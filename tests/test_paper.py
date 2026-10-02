@@ -163,9 +163,29 @@ class _FakeAccountV2:
         return _FakeResponse(self._positions)
 
 
+class _FakeOrderV3:
+    def __init__(self) -> None:
+        self.placed = []
+        self.previewed = []
+        self.canceled = []
+
+    def preview_order(self, account_id, preview_orders, client_combo_order_id=None):
+        self.previewed.append((account_id, preview_orders))
+        return _FakeResponse({"data": [{"estimated_cost": "0.11"}]})
+
+    def place_order(self, account_id, new_orders, client_combo_order_id=None):
+        self.placed.append((account_id, new_orders))
+        return _FakeResponse({"client_order_id": new_orders[0]["client_order_id"]})
+
+    def cancel_order(self, account_id, client_order_id):
+        self.canceled.append((account_id, client_order_id))
+        return _FakeResponse({"client_order_id": client_order_id})
+
+
 class _FakeTradeClient:
-    def __init__(self, account_v2) -> None:
+    def __init__(self, account_v2, order_v3=None) -> None:
         self.account_v2 = account_v2
+        self.order_v3 = order_v3 or _FakeOrderV3()
 
 
 def _sdk_session(accounts=None, positions=None, quote_payload=None, account_id="cfg-1", quote_status: int = 200) -> WebullSdkSession:
@@ -234,13 +254,101 @@ def test_webull_positions_fall_back_to_first_sandbox_account() -> None:
     assert account_v2.requested_account_id == "sandbox-first"
 
 
-def test_webull_submit_order_stays_disabled_with_session() -> None:
+def test_webull_submit_order_places_sandbox_order_with_correct_payload() -> None:
+    order_v3 = _FakeOrderV3()
+    session = WebullSdkSession(
+        trade_client=_FakeTradeClient(_FakeAccountV2(accounts=[{"account_id": "cfg-1"}]), order_v3),
+        data_client=_FakeDataClient([]),
+        account_id="cfg-1",
+    )
+    adapter = WebullSandboxBroker(session=session)
+
+    order = adapter.submit_order("nivf", OrderSide.BUY, 5, OrderType.LIMIT, limit_price=0.11)
+
+    assert order.symbol == "NIVF"
+    assert order.status is OrderStatus.OPEN
+    assert order.client_order_id
+    account_id, new_orders = order_v3.placed[0]
+    assert account_id == "cfg-1"
+    payload = new_orders[0]
+    assert payload["client_order_id"] == order.client_order_id
+    assert payload["combo_type"] == "NORMAL"
+    assert payload["symbol"] == "NIVF"
+    assert payload["instrument_type"] == "EQUITY"
+    assert payload["market"] == "US"
+    assert payload["order_type"] == "LIMIT"
+    assert payload["limit_price"] == "0.11"
+    assert payload["quantity"] == "5"
+    assert payload["side"] == "BUY"
+    assert payload["time_in_force"] == "DAY"
+    assert payload["support_trading_session"] == "CORE"
+    assert payload["entrust_type"] == "QTY"
+
+
+def test_webull_submit_order_maps_stop_to_stop_loss() -> None:
+    order_v3 = _FakeOrderV3()
+    session = WebullSdkSession(
+        trade_client=_FakeTradeClient(_FakeAccountV2(accounts=[{"account_id": "cfg-1"}]), order_v3),
+        data_client=_FakeDataClient([]),
+        account_id="cfg-1",
+    )
+    adapter = WebullSandboxBroker(session=session)
+
+    order = adapter.submit_order("NIVF", OrderSide.SELL, 5, OrderType.STOP, stop_price=0.09)
+
+    payload = order_v3.placed[0][1][0]
+    assert payload["order_type"] == "STOP_LOSS"
+    assert payload["stop_price"] == "0.09"
+    assert "limit_price" not in payload
+    assert order.stop_price == Decimal("0.09")
+
+
+def test_webull_preview_order_remote_calls_sdk() -> None:
+    order_v3 = _FakeOrderV3()
+    session = WebullSdkSession(
+        trade_client=_FakeTradeClient(_FakeAccountV2(accounts=[{"account_id": "cfg-1"}]), order_v3),
+        data_client=_FakeDataClient([]),
+        account_id="cfg-1",
+    )
+    adapter = WebullSandboxBroker(session=session)
+
+    estimate = adapter.preview_order_remote("NIVF", OrderSide.BUY, 1, OrderType.LIMIT, limit_price=0.10)
+
+    account_id, preview_orders = order_v3.previewed[0]
+    assert account_id == "cfg-1"
+    assert preview_orders[0]["symbol"] == "NIVF"
+    assert estimate["data"][0]["estimated_cost"] == "0.11"
+
+
+def test_webull_cancel_order_by_local_id_marks_canceled() -> None:
+    order_v3 = _FakeOrderV3()
+    session = WebullSdkSession(
+        trade_client=_FakeTradeClient(_FakeAccountV2(accounts=[{"account_id": "cfg-1"}]), order_v3),
+        data_client=_FakeDataClient([]),
+        account_id="cfg-1",
+    )
+    adapter = WebullSandboxBroker(session=session)
+    order = adapter.submit_order("NIVF", OrderSide.BUY, 1, OrderType.LIMIT, limit_price=0.10)
+
+    canceled = adapter.cancel_order(order.order_id)
+
+    assert canceled is order
+    assert order.status is OrderStatus.CANCELED
+    assert order_v3.canceled == [("cfg-1", order.client_order_id)]
+
+
+def test_webull_cancel_order_unknown_id_returns_none() -> None:
     adapter = WebullSandboxBroker(session=_sdk_session())
+    assert adapter.cancel_order(999) is None
+
+
+def test_webull_submit_order_still_requires_session() -> None:
+    adapter = WebullSandboxBroker()
 
     try:
         adapter.submit_order("NIVF", OrderSide.BUY, 1, OrderType.MARKET)
-        raise AssertionError("order submission must stay disabled")
-    except NotImplementedError:
+        raise AssertionError("submit_order should require a session")
+    except RuntimeError:
         pass
 
 

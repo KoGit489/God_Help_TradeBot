@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Protocol, runtime_checkable
 
-from .paper import OrderSide, OrderType, PaperOrder, Position, Quote
+from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,17 @@ class WebullSessionConfig:
 WEBULL_REGION = "us"
 WEBULL_SANDBOX_ENDPOINT = "api.sandbox.webull.com"
 US_STOCK_CATEGORY = "US_STOCK"
+US_MARKET = "US"
+EQUITY_INSTRUMENT = "EQUITY"
+NORMAL_COMBO = "NORMAL"
+QTY_ENTRUST = "QTY"
+VALID_TRADING_SESSIONS = {"CORE", "ALL", "NIGHT"}
+
+WEBULL_ORDER_TYPES = {
+    OrderType.MARKET: "MARKET",
+    OrderType.LIMIT: "LIMIT",
+    OrderType.STOP: "STOP_LOSS",
+}
 
 
 @dataclass
@@ -147,6 +159,8 @@ class WebullSandboxBroker:
         self.live_mode = resolved_config.live_mode
         self._quote_cache: dict[str, Quote] = {}
         self._resolved_account_id: str | None = None
+        self._orders: dict[int, PaperOrder] = {}
+        self._next_order_id = 1
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "WebullSandboxBroker":
@@ -172,6 +186,8 @@ class WebullSandboxBroker:
         self.live_mode = self.config.live_mode
         self.session = self._build_sdk_session()
         self._resolved_account_id = None
+        self._orders = {}
+        self._next_order_id = 1
         return self
 
     def _build_sdk_session(self) -> WebullSdkSession:
@@ -217,6 +233,59 @@ class WebullSandboxBroker:
         self._resolved_account_id = account_id
         return account_id
 
+    def _validate_order_params(
+        self,
+        symbol: str,
+        quantity: int,
+        order_type: OrderType,
+        limit_price: float | None,
+        stop_price: float | None,
+    ) -> str:
+        if not symbol or not symbol.strip():
+            raise ValueError("symbol is required")
+        if quantity < 1:
+            raise ValueError("quantity must be positive")
+        if order_type is OrderType.LIMIT and limit_price is None:
+            raise ValueError("limit_price is required for limit orders")
+        if order_type is OrderType.STOP and stop_price is None:
+            raise ValueError("stop_price is required for stop orders")
+        return symbol.strip().upper()
+
+    def _build_order_payload(
+        self,
+        symbol: str,
+        side: OrderSide,
+        quantity: int,
+        order_type: OrderType,
+        *,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        client_order_id: str | None = None,
+        trading_session: str = "CORE",
+    ) -> dict[str, Any]:
+        ticker = self._validate_order_params(symbol, quantity, order_type, limit_price, stop_price)
+        session = trading_session.upper()
+        if session not in VALID_TRADING_SESSIONS:
+            raise ValueError(f"trading_session must be one of {sorted(VALID_TRADING_SESSIONS)}")
+        payload: dict[str, Any] = {
+            "client_order_id": client_order_id or uuid.uuid4().hex,
+            "combo_type": NORMAL_COMBO,
+            "symbol": ticker,
+            "instrument_type": EQUITY_INSTRUMENT,
+            "market": US_MARKET,
+            "order_type": WEBULL_ORDER_TYPES[order_type],
+            "quantity": str(quantity),
+            "side": side.value,
+            "time_in_force": "DAY",
+            "support_trading_session": session,
+            "entrust_type": QTY_ENTRUST,
+        }
+        if order_type is OrderType.LIMIT:
+            payload["limit_price"] = str(Decimal(str(limit_price)))
+        if order_type is OrderType.STOP:
+            payload["stop_price"] = str(Decimal(str(stop_price)))
+        return payload
+
     def submit_order(
         self,
         symbol: str,
@@ -226,11 +295,75 @@ class WebullSandboxBroker:
         *,
         limit_price: float | None = None,
         stop_price: float | None = None,
+        trading_session: str = "CORE",
     ) -> PaperOrder:
         self._require_session()
-        raise NotImplementedError(
-            "Webull sandbox order submission is intentionally disabled until a real sandbox session is configured."
+        if self.live_mode:
+            raise RuntimeError("live order submission is intentionally disabled")
+
+        payload = self._build_order_payload(
+            symbol,
+            side,
+            quantity,
+            order_type,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            trading_session=trading_session,
         )
+        response = self.session.trade_client.order_v3.place_order(
+            self._resolve_account_id(), [payload]
+        )
+        status = getattr(response, "status_code", None)
+        if status != 200:
+            raise RuntimeError(f"Webull sandbox order placement failed with HTTP {status}")
+
+        order = PaperOrder(
+            order_id=self._next_order_id,
+            symbol=payload["symbol"],
+            side=side,
+            quantity=quantity,
+            order_type=order_type,
+            limit_price=Decimal(str(limit_price)) if limit_price is not None else None,
+            stop_price=Decimal(str(stop_price)) if stop_price is not None else None,
+            client_order_id=payload["client_order_id"],
+        )
+        self._orders[order.order_id] = order
+        self._next_order_id += 1
+        return order
+
+    def preview_order_remote(
+        self,
+        symbol: str,
+        side: OrderSide,
+        quantity: int,
+        order_type: OrderType,
+        *,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        trading_session: str = "CORE",
+    ) -> dict[str, Any]:
+        """Ask the Webull sandbox for a real cost/fee estimate without placing the order."""
+        self._require_session()
+        if self.live_mode:
+            raise RuntimeError("live order preview is intentionally disabled")
+
+        payload = self._build_order_payload(
+            symbol,
+            side,
+            quantity,
+            order_type,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            trading_session=trading_session,
+        )
+        response = self.session.trade_client.order_v3.preview_order(
+            self._resolve_account_id(), [payload]
+        )
+        status = getattr(response, "status_code", None)
+        if status != 200:
+            raise RuntimeError(f"Webull sandbox order preview failed with HTTP {status}")
+        data = response.json()
+        return data if isinstance(data, dict) else {"data": data}
 
     def preview_order(
         self,
@@ -242,18 +375,11 @@ class WebullSandboxBroker:
         limit_price: float | None = None,
         stop_price: float | None = None,
     ) -> OrderPreview:
-        if not symbol or not symbol.strip():
-            raise ValueError("symbol is required")
-        if quantity < 1:
-            raise ValueError("quantity must be positive")
-        if order_type is OrderType.LIMIT and limit_price is None:
-            raise ValueError("limit_price is required for limit orders")
-        if order_type is OrderType.STOP and stop_price is None:
-            raise ValueError("stop_price is required for stop orders")
+        ticker = self._validate_order_params(symbol, quantity, order_type, limit_price, stop_price)
 
         estimated = Decimal(str(limit_price if limit_price is not None else stop_price if stop_price is not None else 0.0))
         return OrderPreview(
-            symbol=symbol.upper(),
+            symbol=ticker,
             side=side,
             quantity=quantity,
             order_type=order_type,
@@ -299,9 +425,33 @@ class WebullSandboxBroker:
         self._quote_cache[quote.symbol.upper()] = quote
         return quote
 
-    def cancel_order(self, order_id: int) -> PaperOrder | None:
+    def cancel_order(self, order_id: int | str) -> PaperOrder | None:
+        """Cancel an open sandbox order by local order id or Webull client_order_id."""
         self._require_session()
-        return None
+        if self.live_mode:
+            raise RuntimeError("live order cancellation is intentionally disabled")
+
+        if isinstance(order_id, int):
+            order = self._orders.get(order_id)
+            if order is None or not order.client_order_id:
+                return None
+            client_order_id = order.client_order_id
+        else:
+            client_order_id = order_id
+            order = next(
+                (o for o in self._orders.values() if o.client_order_id == client_order_id),
+                None,
+            )
+
+        response = self.session.trade_client.order_v3.cancel_order(
+            self._resolve_account_id(), client_order_id
+        )
+        status = getattr(response, "status_code", None)
+        if status != 200:
+            raise RuntimeError(f"Webull sandbox order cancellation failed with HTTP {status}")
+        if order is not None:
+            order.status = OrderStatus.CANCELED
+        return order
 
     def _require_session(self) -> None:
         if self.session is None:

@@ -11,7 +11,13 @@ The `Prototype` branch currently contains a broker-independent foundation:
 - Deterministic paper-mode candidate screening using price, momentum, volume, spread, and range position.
 - Virtual cash, positions, market/limit/stop fills, and long OCO-style target/stop behavior.
 - U.S. trading-session detection with holiday and early-close handling.
-- No Webull credentials, network calls, or live order submission.
+- Webull sandbox adapter backed by the official OpenAPI SDK: authenticated quotes,
+  positions, real order previews, and simulated place/cancel against `api.sandbox.webull.com`.
+- No live trading: `live_mode` cannot be enabled and production endpoints are never used.
+
+Sandbox credentials come from Webull OpenAPI Management; the bot targets the
+**Individual Cash** sandbox account (`WEBULL_ACCOUNT_ID`) and the free
+**Nasdaq Basic – Non Display** OpenAPI market-data permission.
 
 Run the tests with:
 
@@ -34,4 +40,5 @@ config = load_webull_config()
 print(config.api_key, config.account_id)
 ```
 
-The next integration step is a paper-mode Webull adapter whose default behavior is read-only and preview-only.
+The next integration step is the strategy monitoring loop: screen candidates, enter a
+sandbox position with bracket orders, and track exits against live sandbox quotes.

@@ -39,6 +39,7 @@ class PaperOrder:
     stop_price: Decimal | None = None
     status: OrderStatus = OrderStatus.OPEN
     fill_price: Decimal | None = None
+    client_order_id: str | None = None
 
 
 @dataclass
