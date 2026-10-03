@@ -8,9 +8,10 @@ volume, spread, and range filters pass, so only strong candidates reach entry.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .broker import WebullSandboxBroker, US_STOCK_CATEGORY
+from .news import NewsReport, fetch_news_sentiment
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,9 @@ class ConfirmationReport:
     net_capital_flow: float
     large_flow_ratio: float | None
     analyst_buy_ratio: float | None
-    passed: bool
+    news_score: float | None = None
+    news_article_count: int = 0
+    passed: bool = False
 
 
 def _float(value: Any) -> float:
@@ -115,20 +118,40 @@ def confirm_candidate(
     symbol: str,
     *,
     min_score: float = 0.5,
+    include_news: bool = True,
+    news_provider: Callable[[str], NewsReport] | None = None,
 ) -> ConfirmationReport:
-    """Combine confirmation signals into a single pass/fail score for a candidate."""
+    """Combine flow, analyst, and news signals into a single pass/fail score."""
     flow_score, large_ratio, net_flow = capital_flow_score(broker, symbol)
     rating_score, buy_ratio = analyst_rating_score(broker, symbol)
 
-    # Capital flow carries more weight for a momentum penny-stock entry; analyst
-    # coverage is a secondary confirmation and is often absent for small caps.
-    score = round((flow_score * 0.7) + (rating_score * 0.3), 4)
+    news_score: float | None = None
+    news_articles = 0
+    if include_news:
+        provider = news_provider or fetch_news_sentiment
+        try:
+            report = provider(symbol)
+            news_score = report.score
+            news_articles = report.article_count
+        except Exception:
+            news_score = None
+
+    if news_score is not None:
+        # Flow remains the anchor; analyst coverage and news coverage add
+        # independent confirmation. News carries the least weight because
+        # penny-stock coverage is sparse and noisy.
+        score = round((flow_score * 0.55) + (rating_score * 0.25) + (news_score * 0.20), 4)
+    else:
+        score = round((flow_score * 0.7) + (rating_score * 0.3), 4)
+
     return ConfirmationReport(
         symbol=symbol.upper(),
         score=score,
         net_capital_flow=round(net_flow, 2),
         large_flow_ratio=large_ratio,
         analyst_buy_ratio=buy_ratio,
+        news_score=news_score,
+        news_article_count=news_articles,
         passed=score >= min_score,
     )
 

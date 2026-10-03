@@ -6,6 +6,7 @@ from god_help_tradebot.confirm import (
     capital_flow_score,
     confirm_candidate,
 )
+from god_help_tradebot.news import NewsReport, fetch_news_sentiment
 from god_help_tradebot.screen import MarketSnapshot
 from datetime import datetime
 from god_help_tradebot.schedule import EASTERN
@@ -146,6 +147,8 @@ def test_monitor_skips_unconfirmed_candidate_and_takes_next() -> None:
             net_capital_flow=0,
             large_flow_ratio=None,
             analyst_buy_ratio=None,
+            news_score=None,
+            news_article_count=0,
             passed=symbol != "BAD",
         )
 
@@ -175,3 +178,111 @@ def test_monitor_without_confirmation_takes_top_candidate() -> None:
     summary = loop.run_once()
 
     assert summary.entries[0].symbol == "GOW"
+
+
+class _FakeNewsResponse:
+    def __init__(self, payload, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError("http error")
+
+
+def _news_payload(items):
+    return {"feed": items}
+
+
+def _news_item(ticker: str, score: float, relevance: float = 1.0):
+    return {
+        "title": "headline",
+        "ticker_sentiment": [
+            {
+                "ticker": ticker,
+                "relevance_score": str(relevance),
+                "ticker_sentiment_score": str(score),
+            }
+        ],
+    }
+
+
+def test_news_sentiment_scores_bullish_coverage(monkeypatch) -> None:
+    items = [_news_item("GOW", 0.5), _news_item("GOW", 0.4), _news_item("GOW", 0.3)]
+    monkeypatch.setattr(
+        "god_help_tradebot.news.requests.get",
+        lambda *a, **k: _FakeNewsResponse(_news_payload(items)),
+    )
+
+    report = fetch_news_sentiment("GOW")
+
+    assert report.symbol == "GOW"
+    assert report.article_count == 3
+    assert report.bullish == 3
+    assert report.average_sentiment == 0.4
+    assert report.score > 0.5
+
+
+def test_news_sentiment_scores_bearish_low(monkeypatch) -> None:
+    items = [_news_item("GOW", -0.5), _news_item("GOW", -0.4)]
+    monkeypatch.setattr(
+        "god_help_tradebot.news.requests.get",
+        lambda *a, **k: _FakeNewsResponse(_news_payload(items)),
+    )
+
+    report = fetch_news_sentiment("GOW")
+
+    assert report.bearish == 2
+    assert report.score < 0.5
+
+
+def test_news_sentiment_ignores_other_tickers(monkeypatch) -> None:
+    items = [_news_item("GOW", 0.5), _news_item("OTHER", -0.9)]
+    monkeypatch.setattr(
+        "god_help_tradebot.news.requests.get",
+        lambda *a, **k: _FakeNewsResponse(_news_payload(items)),
+    )
+
+    report = fetch_news_sentiment("GOW")
+
+    assert report.article_count == 1
+
+
+def test_news_sentiment_network_failure_is_neutral(monkeypatch) -> None:
+    def _raise(*a, **k):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr("god_help_tradebot.news.requests.get", _raise)
+
+    report = fetch_news_sentiment("GOW")
+
+    assert report.score == 0.5
+    assert report.article_count == 0
+
+
+def test_confirm_candidate_blends_news_into_score() -> None:
+    broker = _broker(_flow(700, 300), _rating(strong_buy=8, buy=4, hold=3, sell=1))
+    news = NewsReport("GOW", 0.9, 5, 0.4, 4, 0, 1)
+
+    with_news = confirm_candidate(broker, "GOW", min_score=0.5, news_provider=lambda s: news)
+    without_news = confirm_candidate(broker, "GOW", min_score=0.5, include_news=False)
+
+    assert with_news.news_score == 0.9
+    assert with_news.news_article_count == 5
+    assert with_news.score != without_news.score
+    assert with_news.passed is True
+
+
+def test_confirm_candidate_news_failure_falls_back_to_two_signal_score() -> None:
+    broker = _broker(_flow(700, 300), _rating(strong_buy=8, buy=4, hold=3, sell=1))
+
+    def _failing_news(symbol: str):
+        raise RuntimeError("news offline")
+
+    report = confirm_candidate(broker, "GOW", min_score=0.5, news_provider=_failing_news)
+
+    assert report.news_score is None
+    assert report.score == round((0.7 * 0.7) + (0.75 * 0.3), 4)

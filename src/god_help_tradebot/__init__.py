@@ -5,6 +5,7 @@ from .autoscreen import auto_screen_snapshots
 from .config import BotConfig
 from .confirm import ConfirmationReport, confirm_candidate
 from .monitor import ExitPlan, LoopEvent, LoopSummary, MonitorLoop, build_exit_plan
+from .news import NewsReport, fetch_news_sentiment
 from .paper import OrderSide, OrderStatus, OrderType, PaperBroker, PaperOrder, Position, Quote
 from .risk import TradePlan, build_trade_plan
 from .screen import MarketSnapshot, RankedCandidate, screen_candidates
@@ -18,6 +19,7 @@ __all__ = [
 	"LoopEvent",
 	"LoopSummary",
 	"MonitorLoop",
+	"NewsReport",
 	"OrderPreview",
 	"WebullSdkSession",
 	"WebullSessionConfig",
@@ -37,5 +39,6 @@ __all__ = [
 	"build_exit_plan",
 	"build_trade_plan",
 	"confirm_candidate",
+	"fetch_news_sentiment",
 	"screen_candidates",
 ]
