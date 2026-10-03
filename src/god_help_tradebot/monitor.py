@@ -60,6 +60,8 @@ class MonitorLoop:
         *,
         exit_plans: dict[str, ExitPlan] | None = None,
         snapshot_provider: Callable[[], list[MarketSnapshot]] | None = None,
+        confirmation: Callable[[str], Any] | None = None,
+        min_confirmation_score: float = 0.5,
         now_provider: Callable[[], "datetime"] | None = None,
         poll_seconds: float = 5.0,
         max_polls: int | None = None,
@@ -69,6 +71,8 @@ class MonitorLoop:
         self.config = config or BotConfig()
         self.exit_plans = dict(exit_plans or {})
         self.snapshot_provider = snapshot_provider
+        self.confirmation = confirmation
+        self.min_confirmation_score = min_confirmation_score
         self._now = now_provider or _default_now
         self.poll_seconds = poll_seconds
         self.max_polls = max_polls
@@ -144,7 +148,9 @@ class MonitorLoop:
         ranked = screen_candidates(provider(), self.config)
         if not ranked:
             return
-        candidate = ranked[0]
+        candidate = self._first_confirmed(ranked, summary)
+        if candidate is None:
+            return
         snapshot = candidate.snapshot
         stop_price = Decimal(str(snapshot.day_low)) * Decimal("0.99")
         try:
@@ -164,6 +170,37 @@ class MonitorLoop:
             target_price=plan.target_price,
             stop_price=plan.stop_price,
         )
+
+    def _first_confirmed(
+        self,
+        ranked: list[RankedCandidate],
+        summary: LoopSummary,
+    ) -> RankedCandidate | None:
+        """Return the top-ranked candidate that also passes confirmation, if enabled."""
+        for candidate in ranked:
+            symbol = candidate.snapshot.symbol
+            if self._passes_confirmation(symbol, summary):
+                return candidate
+        return None
+
+    def _passes_confirmation(self, symbol: str, summary: LoopSummary) -> bool:
+        if self.confirmation is None:
+            return True
+        report = self.confirmation(symbol)
+        score = getattr(report, "score", None)
+        passed = getattr(report, "passed", None)
+        if passed is None and score is not None:
+            passed = score >= self.min_confirmation_score
+        if passed is None:
+            return True
+        summary.events.append(
+            LoopEvent(
+                "confirmation",
+                symbol,
+                f"score {score if score is not None else 'n/a'} -> {'pass' if passed else 'reject'}",
+            )
+        )
+        return bool(passed)
 
     def _auto_snapshots(self) -> list[MarketSnapshot]:
         """Discover candidates automatically when the broker is a Webull sandbox session."""
