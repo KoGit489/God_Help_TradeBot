@@ -1,6 +1,7 @@
 """Paper-safe trading bot foundations."""
 
 from .broker import BrokerAdapter, OrderPreview, WebullSandboxBroker, WebullSdkSession, WebullSessionConfig
+from .autoscreen import auto_screen_snapshots
 from .config import BotConfig
 from .monitor import ExitPlan, LoopEvent, LoopSummary, MonitorLoop, build_exit_plan
 from .paper import OrderSide, OrderStatus, OrderType, PaperBroker, PaperOrder, Position, Quote
@@ -30,6 +31,7 @@ __all__ = [
 	"MarketSnapshot",
 	"RankedCandidate",
 	"TradePlan",
+	"auto_screen_snapshots",
 	"build_exit_plan",
 	"build_trade_plan",
 	"screen_candidates",

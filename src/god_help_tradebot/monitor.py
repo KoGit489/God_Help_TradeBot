@@ -135,9 +135,10 @@ class MonitorLoop:
             )
 
     def _maybe_enter(self, summary: LoopSummary) -> None:
-        if self.snapshot_provider is None or not self._market_open():
+        provider = self.snapshot_provider or self._auto_snapshots
+        if not self._market_open():
             return
-        ranked = screen_candidates(self.snapshot_provider(), self.config)
+        ranked = screen_candidates(provider(), self.config)
         if not ranked:
             return
         candidate = ranked[0]
@@ -160,6 +161,14 @@ class MonitorLoop:
             target_price=plan.target_price,
             stop_price=plan.stop_price,
         )
+
+    def _auto_snapshots(self) -> list[MarketSnapshot]:
+        """Discover candidates automatically when the broker is a Webull sandbox session."""
+        if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
+            return []
+        from .autoscreen import auto_screen_snapshots
+
+        return auto_screen_snapshots(self.broker, self.config)
 
     def _market_open(self) -> bool:
         now = self._now()
@@ -191,13 +200,24 @@ def run_sandbox_monitor(
     max_polls: int | None = None,
     allow_entries: bool = False,
     snapshot_provider: Callable[[], list[MarketSnapshot]] | None = None,
+    auto_screen: bool = True,
 ) -> LoopSummary:
-    """Convenience runner: connect the sandbox adapter and start the loop."""
+    """Connect the sandbox adapter and start the loop.
+
+    By default the loop auto-screens the Webull top-gainers list for entries when
+    `allow_entries` is enabled. Pass `snapshot_provider` to supply your own list,
+    or set `auto_screen=False` to disable automatic discovery.
+    """
     broker = WebullSandboxBroker.from_env().connect()
+    provider = snapshot_provider
+    if provider is None and auto_screen and allow_entries:
+        from .autoscreen import auto_screen_snapshots
+
+        provider = lambda: auto_screen_snapshots(broker)
     loop = MonitorLoop(
         broker,
         allow_entries=allow_entries,
-        snapshot_provider=snapshot_provider,
+        snapshot_provider=provider,
         poll_seconds=poll_seconds,
         max_polls=max_polls,
     )

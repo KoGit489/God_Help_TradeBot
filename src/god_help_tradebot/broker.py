@@ -421,6 +421,22 @@ class WebullSandboxBroker:
         self._quote_cache[quote.symbol] = quote
         return quote
 
+    def get_latest_quotes(self, symbols: list[str]) -> dict[str, Quote]:
+        """Fetch snapshots for many symbols in one batched request (max 100 per call)."""
+        tickers = list(dict.fromkeys(s.upper() for s in symbols if s and s.strip()))
+        if not tickers or self.session is None:
+            return {}
+        response = self.session.data_client.market_data.get_snapshot(tickers, US_STOCK_CATEGORY)
+        quotes: dict[str, Quote] = {}
+        for record in _payload_records(response):
+            try:
+                quote = _quote_from_snapshot(record)
+            except ValueError:
+                continue
+            quotes[quote.symbol] = quote
+            self._quote_cache[quote.symbol] = quote
+        return quotes
+
     def set_quote(self, quote: Quote) -> Quote:
         self._quote_cache[quote.symbol.upper()] = quote
         return quote
