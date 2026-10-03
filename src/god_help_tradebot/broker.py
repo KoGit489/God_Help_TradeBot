@@ -81,6 +81,12 @@ WEBULL_ORDER_TYPES = {
     OrderType.STOP: "STOP_LOSS",
 }
 
+WEBULL_STATUS_MAP = {
+    "FILLED": OrderStatus.FILLED,
+    "CANCELLED": OrderStatus.CANCELED,
+    "CANCELED": OrderStatus.CANCELED,
+}
+
 
 @dataclass
 class WebullSdkSession:
@@ -468,6 +474,37 @@ class WebullSandboxBroker:
         if order is not None:
             order.status = OrderStatus.CANCELED
         return order
+
+    def get_order_status(self, client_order_id: str) -> dict[str, Any] | None:
+        """Fetch one sandbox order's live status record by client_order_id."""
+        self._require_session()
+        response = self.session.trade_client.order_v3.get_order_detail(
+            self._resolve_account_id(), client_order_id
+        )
+        payload = response.json()
+        orders = payload.get("orders", []) if isinstance(payload, dict) else []
+        return orders[0] if orders else None
+
+    def sync_orders(self) -> None:
+        """Refresh locally tracked open orders with their real sandbox status and fills."""
+        for order in list(self._orders.values()):
+            if order.status is not OrderStatus.OPEN or not order.client_order_id:
+                continue
+            record = self.get_order_status(order.client_order_id)
+            if record is None:
+                continue
+            mapped = WEBULL_STATUS_MAP.get(str(record.get("status", "")).upper())
+            if mapped is OrderStatus.FILLED:
+                order.status = OrderStatus.FILLED
+                filled_avg = record.get("filled_avg_price") or record.get("avg_price")
+                if filled_avg not in (None, ""):
+                    order.fill_price = Decimal(str(filled_avg))
+            elif mapped is OrderStatus.CANCELED:
+                order.status = OrderStatus.CANCELED
+
+    def open_orders(self) -> list[PaperOrder]:
+        """Locally tracked orders still open after the latest sync."""
+        return [o for o in self._orders.values() if o.status is OrderStatus.OPEN]
 
     def _require_session(self) -> None:
         if self.session is None:

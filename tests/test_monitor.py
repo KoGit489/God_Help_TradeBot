@@ -56,8 +56,8 @@ def test_monitor_exits_at_target_price() -> None:
     summary = loop.run_once()
 
     assert summary.exits[0].order_type is OrderType.LIMIT
-    assert summary.exits[0].status is OrderStatus.FILLED
-    assert summary.events[0].kind == "take_profit"
+    assert summary.exits[0].status is OrderStatus.OPEN
+    assert summary.events[0].kind == "take_profit_order"
 
 
 def test_monitor_exits_at_stop_price() -> None:
@@ -69,7 +69,8 @@ def test_monitor_exits_at_stop_price() -> None:
     summary = loop.run_once()
 
     assert summary.exits[0].order_type is OrderType.STOP
-    assert summary.events[0].kind == "stop_loss"
+    assert summary.exits[0].status is OrderStatus.OPEN
+    assert summary.events[0].kind == "stop_loss_order"
 
 
 def test_monitor_holds_within_bracket() -> None:

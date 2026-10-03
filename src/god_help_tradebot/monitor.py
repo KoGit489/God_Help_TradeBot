@@ -79,6 +79,7 @@ class MonitorLoop:
         summary = summary or LoopSummary()
         summary.polls += 1
 
+        self._sync_orders()
         positions = self.broker.get_positions()
         for symbol, position in positions.items():
             if position.quantity > 0:
@@ -100,6 +101,12 @@ class MonitorLoop:
             time.sleep(self.poll_seconds)
         return summary
 
+    def _sync_orders(self) -> None:
+        """Refresh real broker order status when the adapter supports it."""
+        sync = getattr(self.broker, "sync_orders", None)
+        if callable(sync):
+            sync()
+
     def _has_open_position(self, positions: dict[str, Position]) -> bool:
         return any(position.quantity > 0 for position in positions.values())
 
@@ -116,22 +123,18 @@ class MonitorLoop:
                 symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
                 limit_price=float(plan.target_price),
             )
-            order.status = OrderStatus.FILLED
-            order.fill_price = quote.bid
             summary.exits.append(order)
             summary.events.append(
-                LoopEvent("take_profit", symbol, f"sold {position.quantity} at {quote.bid}")
+                LoopEvent("take_profit_order", symbol, f"submitted {position.quantity} at {quote.bid}")
             )
         elif quote.bid <= plan.stop_price:
             order = self.broker.submit_order(
                 symbol, OrderSide.SELL, position.quantity, OrderType.STOP,
                 stop_price=float(plan.stop_price),
             )
-            order.status = OrderStatus.FILLED
-            order.fill_price = quote.bid
             summary.exits.append(order)
             summary.events.append(
-                LoopEvent("stop_loss", symbol, f"sold {position.quantity} at {quote.bid}")
+                LoopEvent("stop_loss_order", symbol, f"submitted {position.quantity} at {quote.bid}")
             )
 
     def _maybe_enter(self, summary: LoopSummary) -> None:

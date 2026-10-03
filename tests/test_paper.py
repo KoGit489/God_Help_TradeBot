@@ -168,6 +168,7 @@ class _FakeOrderV3:
         self.placed = []
         self.previewed = []
         self.canceled = []
+        self.details: dict[str, dict] = {}
 
     def preview_order(self, account_id, preview_orders, client_combo_order_id=None):
         self.previewed.append((account_id, preview_orders))
@@ -180,6 +181,11 @@ class _FakeOrderV3:
     def cancel_order(self, account_id, client_order_id):
         self.canceled.append((account_id, client_order_id))
         return _FakeResponse({"client_order_id": client_order_id})
+
+    def get_order_detail(self, account_id, client_order_id):
+        record = self.details.get(client_order_id)
+        orders = [record] if record is not None else []
+        return _FakeResponse({"orders": orders})
 
 
 class _FakeTradeClient:
@@ -364,3 +370,32 @@ def test_webull_connect_requires_credentials(monkeypatch, tmp_path) -> None:
         raise AssertionError("connect() should require credentials")
     except ValueError:
         pass
+
+
+def test_webull_sync_orders_marks_filled_and_cancelled() -> None:
+    order_v3 = _FakeOrderV3()
+    order_v3.details = {
+        "cid-fill": {"status": "FILLED", "filled_avg_price": "0.11"},
+        "cid-cancel": {"status": "CANCELLED"},
+        "cid-open": {"status": "WORKING"},
+    }
+    session = WebullSdkSession(
+        trade_client=_FakeTradeClient(_FakeAccountV2(accounts=[{"account_id": "cfg-1"}]), order_v3),
+        data_client=_FakeDataClient([]),
+        account_id="cfg-1",
+    )
+    adapter = WebullSandboxBroker(session=session)
+    filled = adapter.submit_order("NIVF", OrderSide.BUY, 1, OrderType.LIMIT, limit_price=0.11)
+    cancelled = adapter.submit_order("NIVF", OrderSide.BUY, 1, OrderType.LIMIT, limit_price=0.10)
+    still_open = adapter.submit_order("NIVF", OrderSide.BUY, 1, OrderType.LIMIT, limit_price=0.09)
+    filled.client_order_id = "cid-fill"
+    cancelled.client_order_id = "cid-cancel"
+    still_open.client_order_id = "cid-open"
+
+    adapter.sync_orders()
+
+    assert filled.status is OrderStatus.FILLED
+    assert filled.fill_price == Decimal("0.11")
+    assert cancelled.status is OrderStatus.CANCELED
+    assert still_open.status is OrderStatus.OPEN
+    assert adapter.open_orders() == [still_open]
