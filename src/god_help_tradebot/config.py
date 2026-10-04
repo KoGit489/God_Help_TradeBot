@@ -25,7 +25,7 @@ class BotConfig:
             raise ValueError("reward_multiple must be at least 1")
         if self.max_position_value_usd <= 0:
             raise ValueError("max_position_value_usd must be positive")
-        if self.min_change_percent < 0 or self.max_change_percent < self.min_change_percent:
+        if self.max_change_percent < self.min_change_percent:
             raise ValueError("change percent bounds are invalid")
         if self.min_relative_volume <= 0:
             raise ValueError("min_relative_volume must be positive")

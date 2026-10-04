@@ -17,6 +17,7 @@ from .screen import MarketSnapshot
 GAINER_RANK_TYPE = "DAY_1"
 GAINER_SORT = "CHANGE_RATIO"
 DESCENDING = "DESC"
+MOST_ACTIVE_RANK_TYPE = "RELATIVE_VOLUME_10D"
 
 
 def _decimal_or_zero(value: Any) -> float:
@@ -55,12 +56,32 @@ def _change_percent(row: dict[str, Any]) -> float:
     return _decimal_or_zero(row.get("change_ratio")) * 100
 
 
+# Pre-pop discovery keeps quiet movers only (accumulation before the spike).
+PREPOP_MIN_CHANGE = -2.0
+PREPOP_MAX_CHANGE = 4.0
+
+
 def fetch_top_gainers(broker: WebullSandboxBroker, limit: int = 50) -> list[dict[str, Any]]:
     """Fetch the top gainers list from the broker's data client."""
     response = broker.session.data_client.screener.list_gainers_losers(
         rank_type=GAINER_RANK_TYPE,
         category=US_STOCK_CATEGORY,
         sort_by=GAINER_SORT,
+        direction=DESCENDING,
+    )
+    payload = response.json()
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows[:limit] if isinstance(row, dict)]
+
+
+def fetch_most_active(broker: WebullSandboxBroker, limit: int = 50) -> list[dict[str, Any]]:
+    """Fetch the most-active list ranked by 10-day relative volume (pre-pop hunting)."""
+    response = broker.session.data_client.screener.list_most_active(
+        category=US_STOCK_CATEGORY,
+        rank_type=MOST_ACTIVE_RANK_TYPE,
+        sort_by="RELATIVE_VOLUME_10D",
         direction=DESCENDING,
     )
     payload = response.json()
@@ -114,14 +135,18 @@ def auto_screen_snapshots(
     config: BotConfig | None = None,
     *,
     limit: int = 50,
+    source: str = "gainers",
 ) -> list[MarketSnapshot]:
-    """Fetch top gainers, convert to snapshots, pre-filter on price, enrich with quotes.
+    """Fetch candidates, convert to snapshots, pre-filter, enrich with quotes.
 
-    Symbols above the configured max price are skipped before quote enrichment to
-    avoid wasting API calls.
+    source='gainers' hunts momentum (already moving); source='most_active' hunts
+    pre-pop accumulation (unusual relative volume before the move).
     """
     config = config or BotConfig()
-    rows = fetch_top_gainers(broker, limit=limit)
+    if source == "most_active":
+        rows = fetch_most_active(broker, limit=limit)
+    else:
+        rows = fetch_top_gainers(broker, limit=limit)
     snapshots = []
     for row in rows:
         snapshot = screener_row_to_snapshot(row)
@@ -129,7 +154,11 @@ def auto_screen_snapshots(
             continue
         if snapshot.price > config.max_symbol_price:
             continue
-        if snapshot.change_percent < config.min_change_percent:
+        # Pre-pop discovery keeps quiet movers; momentum discovery needs the move.
+        if source == "most_active":
+            if not (PREPOP_MIN_CHANGE <= snapshot.change_percent <= PREPOP_MAX_CHANGE):
+                continue
+        elif snapshot.change_percent < config.min_change_percent:
             continue
         snapshots.append(snapshot)
     return enrich_with_quotes(broker, snapshots)
@@ -138,6 +167,7 @@ def auto_screen_snapshots(
 __all__ = [
     "auto_screen_snapshots",
     "enrich_with_quotes",
+    "fetch_most_active",
     "fetch_top_gainers",
     "screener_row_to_snapshot",
 ]

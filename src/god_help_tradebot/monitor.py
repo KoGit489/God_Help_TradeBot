@@ -7,6 +7,7 @@ screened candidate with an OCO-style bracket when the market is open.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -17,7 +18,14 @@ from .config import BotConfig
 from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
 from .risk import TradePlan, build_trade_plan
 from .schedule import TradingSession, get_trading_session
-from .screen import MarketSnapshot, RankedCandidate, screen_candidates
+from .screen import (
+    MarketSnapshot,
+    ProfiledCandidate,
+    RankedCandidate,
+    best_candidate,
+    screen_candidates,
+    screen_prepop_candidates,
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,7 @@ class MonitorLoop:
         poll_seconds: float = 5.0,
         max_polls: int | None = None,
         allow_entries: bool = False,
+        use_events: bool = False,
     ) -> None:
         self.broker = broker
         self.config = config or BotConfig()
@@ -77,6 +86,8 @@ class MonitorLoop:
         self.poll_seconds = poll_seconds
         self.max_polls = max_polls
         self.allow_entries = allow_entries
+        self.use_events = use_events
+        self._events_client: Any | None = None
 
     def run_once(self, summary: LoopSummary | None = None) -> LoopSummary:
         """Run one poll cycle; returns the cumulative summary."""
@@ -98,6 +109,8 @@ class MonitorLoop:
     def run(self, summary: LoopSummary | None = None) -> LoopSummary:
         """Poll until max_polls is reached; sleeps poll_seconds between cycles."""
         summary = summary or LoopSummary()
+        if self.use_events:
+            self.start_event_stream()
         while self.max_polls is None or summary.polls < self.max_polls:
             self.run_once(summary)
             if self.max_polls is not None and summary.polls >= self.max_polls:
@@ -110,6 +123,47 @@ class MonitorLoop:
         sync = getattr(self.broker, "sync_orders", None)
         if callable(sync):
             sync()
+
+    def start_event_stream(self) -> None:
+        """Subscribe to order-status events via gRPC when enabled and available.
+
+        Runs the blocking subscription on a daemon thread; polling via sync_orders
+        continues each cycle as the reconciliation fallback.
+        """
+        if not self.use_events or self._events_client is not None:
+            return
+        if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
+            return
+        try:
+            import threading
+
+            from webull.trade.trade_events_client import TradeEventsClient
+        except Exception:
+            return
+
+        config = self.broker.config
+        client = TradeEventsClient(config.api_key, config.api_secret, "us")
+        client.on_events_message = self._on_order_event
+        account_id = self.broker.session.account_id
+        if not account_id:
+            return
+        thread = threading.Thread(
+            target=lambda: client.do_subscribe([account_id]),
+            daemon=True,
+        )
+        thread.start()
+        self._events_client = client
+
+    def _on_order_event(self, event_type, subscribe_type, payload, raw_message) -> None:
+        """Handle an order-status event; polling remains the reconciliation path."""
+        try:
+            from webull.trade.events.types import EVENT_TYPE_ORDER, ORDER_STATUS_CHANGED
+        except Exception:
+            return
+        if event_type == EVENT_TYPE_ORDER and subscribe_type == ORDER_STATUS_CHANGED:
+            # Reconcile tracked orders against the broker on the next poll cycle;
+            # this event is the fast signal that something changed.
+            self._sync_orders()
 
     def _has_open_position(self, positions: dict[str, Position]) -> bool:
         return any(position.quantity > 0 for position in positions.values())
@@ -142,16 +196,95 @@ class MonitorLoop:
             )
 
     def _maybe_enter(self, summary: LoopSummary) -> None:
-        provider = self.snapshot_provider or self._auto_snapshots
         if not self._market_open():
             return
-        ranked = screen_candidates(provider(), self.config)
-        if not ranked:
+        snapshots = self._gather_snapshots()
+        if not snapshots:
             return
-        candidate = self._first_confirmed(ranked, summary)
-        if candidate is None:
+
+        chosen = self._select_candidate(snapshots, summary)
+        if chosen is None:
             return
-        snapshot = candidate.snapshot
+        self._enter(chosen, summary)
+
+    def _gather_snapshots(self) -> list[MarketSnapshot]:
+        """Combine momentum (top gainers) and pre-pop (most active) discovery."""
+        if self.snapshot_provider is not None:
+            return self.snapshot_provider()
+        if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
+            return []
+        from .autoscreen import auto_screen_snapshots
+
+        snapshots = auto_screen_snapshots(self.broker, self.config, source="gainers")
+        prepop = auto_screen_snapshots(self.broker, self.config, source="most_active")
+        # Deduplicate by symbol, keeping the first occurrence.
+        seen: dict[str, MarketSnapshot] = {}
+        for snapshot in snapshots + prepop:
+            seen.setdefault(snapshot.symbol, snapshot)
+        return list(seen.values())
+
+    def _select_candidate(
+        self,
+        snapshots: list[MarketSnapshot],
+        summary: LoopSummary,
+    ) -> tuple[ProfiledCandidate, bool] | None:
+        """Pick the best candidate across profiles; fall back to best-odds if needed.
+
+        Returns (profiled_candidate, is_fallback) or None when nothing qualifies.
+        """
+        for profiled in self._ranked_profiles(snapshots):
+            if self._passes_confirmation(profiled.candidate.snapshot.symbol, summary):
+                return profiled, False
+
+        # Forced fallback: relax gates progressively and take the best-odds survivor.
+        return self._best_odds_fallback(snapshots, summary)
+
+    def _ranked_profiles(self, snapshots: list[MarketSnapshot]) -> list[ProfiledCandidate]:
+        """Rank momentum and pre-pop candidates together, best score first."""
+        combined = [
+            ProfiledCandidate(candidate, "momentum")
+            for candidate in screen_candidates(snapshots, self.config)
+        ] + [
+            ProfiledCandidate(candidate, "prepop")
+            for candidate in screen_prepop_candidates(snapshots, self.config)
+        ]
+        combined.sort(key=lambda item: item.candidate.score, reverse=True)
+        return combined
+
+    def _best_odds_fallback(
+        self,
+        snapshots: list[MarketSnapshot],
+        summary: LoopSummary,
+    ) -> tuple[ProfiledCandidate, bool] | None:
+        """Progressively relax screening gates and take the best-odds survivor."""
+        relaxed = dataclasses.replace(
+            self.config,
+            min_change_percent=-5.0,
+            max_change_percent=100.0,
+            min_relative_volume=1.0,
+            min_average_volume=50_000,
+            max_spread_percent=3.0,
+        )
+        candidates = screen_candidates(snapshots, relaxed)
+        if not candidates:
+            return None
+        best = candidates[0]
+        summary.events.append(
+            LoopEvent(
+                "fallback_entry_candidate",
+                best.snapshot.symbol,
+                f"best-odds fallback (score {best.score})",
+            )
+        )
+        return ProfiledCandidate(best, "fallback"), True
+
+    def _enter(
+        self,
+        chosen: tuple[ProfiledCandidate, bool],
+        summary: LoopSummary,
+    ) -> None:
+        profiled, is_fallback = chosen
+        snapshot = profiled.candidate.snapshot
         stop_price = Decimal(str(snapshot.day_low)) * Decimal("0.99")
         try:
             plan = build_trade_plan(snapshot.price, float(stop_price), self.config)
@@ -162,7 +295,11 @@ class MonitorLoop:
         )
         summary.entries.append(order)
         summary.events.append(
-            LoopEvent("entry", snapshot.symbol, f"bought {plan.quantity} (score {candidate.score})")
+            LoopEvent(
+                "entry",
+                snapshot.symbol,
+                f"bought {plan.quantity} [{profiled.profile}] (score {profiled.candidate.score})",
+            )
         )
         self.exit_plans[snapshot.symbol] = ExitPlan(
             symbol=snapshot.symbol,
@@ -170,6 +307,10 @@ class MonitorLoop:
             target_price=plan.target_price,
             stop_price=plan.stop_price,
         )
+        if is_fallback:
+            summary.events.append(
+                LoopEvent("fallback_entry", snapshot.symbol, "entered on relaxed best-odds gates")
+            )
 
     def _first_confirmed(
         self,
@@ -202,14 +343,6 @@ class MonitorLoop:
         )
         return bool(passed)
 
-    def _auto_snapshots(self) -> list[MarketSnapshot]:
-        """Discover candidates automatically when the broker is a Webull sandbox session."""
-        if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
-            return []
-        from .autoscreen import auto_screen_snapshots
-
-        return auto_screen_snapshots(self.broker, self.config)
-
     def _market_open(self) -> bool:
         now = self._now()
         session = get_trading_session(now.date())
@@ -240,26 +373,25 @@ def run_sandbox_monitor(
     max_polls: int | None = None,
     allow_entries: bool = False,
     snapshot_provider: Callable[[], list[MarketSnapshot]] | None = None,
-    auto_screen: bool = True,
+    confirmation: Callable[[str], Any] | None = None,
+    use_events: bool = False,
 ) -> LoopSummary:
     """Connect the sandbox adapter and start the loop.
 
-    By default the loop auto-screens the Webull top-gainers list for entries when
-    `allow_entries` is enabled. Pass `snapshot_provider` to supply your own list,
-    or set `auto_screen=False` to disable automatic discovery.
+    With allow_entries enabled and no snapshot_provider, the loop auto-discovers
+    candidates from both the top-gainers (momentum) and most-active (pre-pop)
+    lists, picks the higher-odds candidate, and falls back to best-odds entry if
+    nothing passes the normal gates.
     """
     broker = WebullSandboxBroker.from_env().connect()
-    provider = snapshot_provider
-    if provider is None and auto_screen and allow_entries:
-        from .autoscreen import auto_screen_snapshots
-
-        provider = lambda: auto_screen_snapshots(broker)
     loop = MonitorLoop(
         broker,
         allow_entries=allow_entries,
-        snapshot_provider=provider,
+        snapshot_provider=snapshot_provider,
+        confirmation=confirmation,
         poll_seconds=poll_seconds,
         max_polls=max_polls,
+        use_events=use_events,
     )
     return loop.run()
 
