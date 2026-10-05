@@ -15,6 +15,7 @@ from typing import Callable
 
 from .broker import BrokerAdapter, WebullSandboxBroker
 from .config import BotConfig
+from .confirm import confirm_candidate
 from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
 from .risk import TradePlan, build_trade_plan
 from .schedule import TradingSession, get_trading_session
@@ -88,6 +89,7 @@ class MonitorLoop:
         self.allow_entries = allow_entries
         self.use_events = use_events
         self._events_client: Any | None = None
+        self._market_news: Any | None = None
 
     def run_once(self, summary: LoopSummary | None = None) -> LoopSummary:
         """Run one poll cycle; returns the cumulative summary."""
@@ -327,7 +329,7 @@ class MonitorLoop:
     def _passes_confirmation(self, symbol: str, summary: LoopSummary) -> bool:
         if self.confirmation is None:
             return True
-        report = self.confirmation(symbol)
+        report = self._confirm(symbol)
         score = getattr(report, "score", None)
         passed = getattr(report, "passed", None)
         if passed is None and score is not None:
@@ -342,6 +344,29 @@ class MonitorLoop:
             )
         )
         return bool(passed)
+
+    def _confirm(self, symbol: str) -> Any:
+        """Run confirmation, supplying the shared market backdrop when available."""
+        if self.confirmation is confirm_candidate or self.confirmation is None:
+            if isinstance(self.broker, WebullSandboxBroker):
+                return confirm_candidate(
+                    self.broker,
+                    symbol,
+                    min_score=self.min_confirmation_score,
+                    market_news=self._market_news_report(),
+                )
+        return self.confirmation(symbol)
+
+    def _market_news_report(self) -> Any | None:
+        """Fetch the broad market backdrop once per loop run and reuse it."""
+        if self._market_news is None:
+            try:
+                from .worldnews import fetch_market_news
+
+                self._market_news = fetch_market_news()
+            except Exception:
+                self._market_news = None
+        return self._market_news
 
     def _market_open(self) -> bool:
         now = self._now()

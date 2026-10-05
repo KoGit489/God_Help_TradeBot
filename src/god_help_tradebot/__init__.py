@@ -10,6 +10,7 @@ from .paper import OrderSide, OrderStatus, OrderType, PaperBroker, PaperOrder, P
 from .risk import TradePlan, build_trade_plan
 from .screen import MarketSnapshot, RankedCandidate, screen_candidates
 from .settings import load_webull_config
+from .worldnews import MarketNewsReport, fetch_market_news
 
 __all__ = [
 	"BotConfig",
@@ -39,6 +40,7 @@ __all__ = [
 	"build_exit_plan",
 	"build_trade_plan",
 	"confirm_candidate",
+	"fetch_market_news",
 	"fetch_news_sentiment",
 	"screen_candidates",
 ]

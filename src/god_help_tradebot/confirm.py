@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from .broker import WebullSandboxBroker, US_STOCK_CATEGORY
 from .news import NewsReport, fetch_news_sentiment
+from .worldnews import MarketNewsReport, fetch_market_news, market_adjustment
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,8 @@ class ConfirmationReport:
     analyst_buy_ratio: float | None
     news_score: float | None = None
     news_article_count: int = 0
+    market_score: float | None = None
+    market_article_count: int = 0
     passed: bool = False
 
 
@@ -120,8 +123,13 @@ def confirm_candidate(
     min_score: float = 0.5,
     include_news: bool = True,
     news_provider: Callable[[str], NewsReport] | None = None,
+    market_news: MarketNewsReport | None = None,
 ) -> ConfirmationReport:
-    """Combine flow, analyst, and news signals into a single pass/fail score."""
+    """Combine flow, analyst, news, and market-backdrop signals into a pass/fail.
+
+    `market_news` is the broad macro/world backdrop fetched once per loop run and
+    shared across candidates. When omitted, it is fetched on demand (cached).
+    """
     flow_score, large_ratio, net_flow = capital_flow_score(broker, symbol)
     rating_score, buy_ratio = analyst_rating_score(broker, symbol)
 
@@ -135,6 +143,22 @@ def confirm_candidate(
             news_articles = report.article_count
         except Exception:
             news_score = None
+
+    market_score: float | None = None
+    market_articles = 0
+    threshold = min_score
+    if include_news:
+        market = market_news
+        if market is None:
+            try:
+                market = fetch_market_news()
+            except Exception:
+                market = None
+        if market is not None:
+            market_score = market.score
+            market_articles = market.article_count
+            # A hostile macro backdrop raises the bar; a favorable one lowers it.
+            threshold = round(min_score - market_adjustment(market), 4)
 
     if news_score is not None:
         # Flow remains the anchor; analyst coverage and news coverage add
@@ -152,7 +176,9 @@ def confirm_candidate(
         analyst_buy_ratio=buy_ratio,
         news_score=news_score,
         news_article_count=news_articles,
-        passed=score >= min_score,
+        market_score=market_score,
+        market_article_count=market_articles,
+        passed=score >= threshold,
     )
 
 
