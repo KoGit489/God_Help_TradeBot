@@ -337,6 +337,83 @@ class WebullSandboxBroker:
         self._next_order_id += 1
         return order
 
+    def submit_bracket(
+        self,
+        symbol: str,
+        quantity: int,
+        *,
+        target_price: float,
+        stop_price: float,
+        trading_session: str = "CORE",
+    ) -> PaperOrder:
+        """Place an atomic OTOCO bracket: buy entry + take-profit + stop-loss legs.
+
+        The exit legs ride with the entry natively at Webull, so the position is
+        protected even if the loop is offline when the price crosses a level.
+        Returns the MASTER entry order.
+        """
+        self._require_session()
+        if self.live_mode:
+            raise RuntimeError("live order submission is intentionally disabled")
+        if target_price <= stop_price:
+            raise ValueError("target_price must be above stop_price for a long bracket")
+
+        ticker = self._validate_order_params(symbol, quantity, OrderType.MARKET, None, None)
+        combo_id = uuid.uuid4().hex
+        base = {
+            "symbol": ticker,
+            "instrument_type": EQUITY_INSTRUMENT,
+            "market": US_MARKET,
+            "quantity": str(quantity),
+            "time_in_force": "DAY",
+            "support_trading_session": trading_session.upper(),
+            "entrust_type": QTY_ENTRUST,
+        }
+        entry = {
+            **base,
+            "client_order_id": uuid.uuid4().hex,
+            "combo_type": "MASTER",
+            "order_type": "MARKET",
+            "side": "BUY",
+        }
+        take_profit = {
+            **base,
+            "client_order_id": uuid.uuid4().hex,
+            "combo_type": "STOP_PROFIT",
+            "order_type": "LIMIT",
+            "limit_price": str(Decimal(str(target_price))),
+            "side": "SELL",
+        }
+        stop_loss = {
+            **base,
+            "client_order_id": uuid.uuid4().hex,
+            "combo_type": "STOP_LOSS",
+            "order_type": "STOP_LOSS",
+            "stop_price": str(Decimal(str(stop_price))),
+            "side": "SELL",
+        }
+
+        response = self.session.trade_client.order_v3.place_order(
+            self._resolve_account_id(),
+            [entry, take_profit, stop_loss],
+            client_combo_order_id=combo_id,
+        )
+        status = getattr(response, "status_code", None)
+        if status != 200:
+            raise RuntimeError(f"Webull sandbox bracket placement failed with HTTP {status}")
+
+        order = PaperOrder(
+            order_id=self._next_order_id,
+            symbol=ticker,
+            side=OrderSide.BUY,
+            quantity=quantity,
+            order_type=OrderType.MARKET,
+            client_order_id=entry["client_order_id"],
+        )
+        self._orders[order.order_id] = order
+        self._next_order_id += 1
+        return order
+
     def preview_order_remote(
         self,
         symbol: str,

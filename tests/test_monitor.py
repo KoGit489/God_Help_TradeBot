@@ -1,4 +1,4 @@
-from datetime import datetime, time
+﻿from datetime import datetime, time
 from decimal import Decimal
 
 from god_help_tradebot import (
@@ -51,7 +51,7 @@ def test_monitor_exits_at_target_price() -> None:
     quote = Quote("NIVF", Decimal("0.15"), Decimal("0.16"), Decimal("0.15"))
     broker = _broker_with_position("NIVF", 100, 0.10, quote)
     plan = ExitPlan(symbol="NIVF", quantity=100, target_price=Decimal("0.15"), stop_price=Decimal("0.09"))
-    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_closed_market_now)
+    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_closed_market_now, flatten_before_close=False)
 
     summary = loop.run_once()
 
@@ -64,7 +64,7 @@ def test_monitor_exits_at_stop_price() -> None:
     quote = Quote("NIVF", Decimal("0.08"), Decimal("0.09"), Decimal("0.08"))
     broker = _broker_with_position("NIVF", 100, 0.10, quote)
     plan = ExitPlan(symbol="NIVF", quantity=100, target_price=Decimal("0.15"), stop_price=Decimal("0.09"))
-    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_closed_market_now)
+    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_closed_market_now, flatten_before_close=False)
 
     summary = loop.run_once()
 
@@ -77,7 +77,7 @@ def test_monitor_holds_within_bracket() -> None:
     quote = Quote("NIVF", Decimal("0.11"), Decimal("0.12"), Decimal("0.11"))
     broker = _broker_with_position("NIVF", 100, 0.10, quote)
     plan = ExitPlan(symbol="NIVF", quantity=100, target_price=Decimal("0.15"), stop_price=Decimal("0.09"))
-    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_closed_market_now)
+    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_closed_market_now, flatten_before_close=False)
 
     summary = loop.run_once()
 
@@ -88,7 +88,7 @@ def test_monitor_holds_within_bracket() -> None:
 def test_monitor_skips_position_without_exit_plan() -> None:
     quote = Quote("NIVF", Decimal("0.08"), Decimal("0.09"), Decimal("0.08"))
     broker = _broker_with_position("NIVF", 100, 0.10, quote)
-    loop = MonitorLoop(broker, now_provider=_closed_market_now)
+    loop = MonitorLoop(broker, now_provider=_closed_market_now, flatten_before_close=False)
 
     summary = loop.run_once()
 
@@ -158,7 +158,7 @@ def test_monitor_run_respects_max_polls() -> None:
 
 def test_monitor_run_once_returns_cumulative_summary() -> None:
     broker = PaperBroker(10_000)
-    loop = MonitorLoop(broker, now_provider=_closed_market_now)
+    loop = MonitorLoop(broker, now_provider=_closed_market_now, flatten_before_close=False)
     summary = LoopSummary()
 
     loop.run_once(summary)

@@ -76,6 +76,10 @@ class MonitorLoop:
         max_polls: int | None = None,
         allow_entries: bool = False,
         use_events: bool = False,
+        state_store: Any | None = None,
+        flatten_before_close: bool = True,
+        max_consecutive_errors: int = 5,
+        error_backoff_seconds: float = 30.0,
     ) -> None:
         self.broker = broker
         self.config = config or BotConfig()
@@ -88,12 +92,36 @@ class MonitorLoop:
         self.max_polls = max_polls
         self.allow_entries = allow_entries
         self.use_events = use_events
+        self.state_store = state_store
+        self.flatten_before_close = flatten_before_close
+        self.max_consecutive_errors = max_consecutive_errors
+        self.error_backoff_seconds = error_backoff_seconds
         self._events_client: Any | None = None
         self._market_news: Any | None = None
+        self._consecutive_errors = 0
+
+        # Restore persisted exit plans so a restart never strands a position.
+        if self.state_store is not None and not self.exit_plans:
+            self.exit_plans = dict(self.state_store.load())
 
     def run_once(self, summary: LoopSummary | None = None) -> LoopSummary:
-        """Run one poll cycle; returns the cumulative summary."""
+        """Run one poll cycle; returns the cumulative summary.
+
+        A single cycle failure is logged and the loop keeps running (resilience).
+        """
         summary = summary or LoopSummary()
+        try:
+            self._run_cycle(summary)
+            self._consecutive_errors = 0
+        except Exception as exc:
+            summary.polls += 1
+            self._consecutive_errors += 1
+            summary.events.append(
+                LoopEvent("error", "loop", f"{type(exc).__name__}: {exc} (x{self._consecutive_errors})")
+            )
+        return summary
+
+    def _run_cycle(self, summary: LoopSummary) -> None:
         summary.polls += 1
 
         self._sync_orders()
@@ -103,10 +131,13 @@ class MonitorLoop:
                 summary.positions_seen[symbol] = position
                 self._maybe_exit(symbol, position, summary)
 
+        if self.flatten_before_close:
+            self._maybe_flatten(positions, summary)
+
         if self.allow_entries and not self._has_open_position(positions):
             self._maybe_enter(summary)
 
-        return summary
+        self._persist_plans()
 
     def run(self, summary: LoopSummary | None = None) -> LoopSummary:
         """Poll until max_polls is reached; sleeps poll_seconds between cycles."""
@@ -115,9 +146,16 @@ class MonitorLoop:
             self.start_event_stream()
         while self.max_polls is None or summary.polls < self.max_polls:
             self.run_once(summary)
+            if self._consecutive_errors >= self.max_consecutive_errors:
+                summary.events.append(
+                    LoopEvent("halt", "loop", f"stopped after {self._consecutive_errors} consecutive errors")
+                )
+                break
             if self.max_polls is not None and summary.polls >= self.max_polls:
                 break
-            time.sleep(self.poll_seconds)
+            # Back off longer after errors to ride out transient API failures.
+            sleep_for = self.error_backoff_seconds if self._consecutive_errors else self.poll_seconds
+            time.sleep(sleep_for)
         return summary
 
     def _sync_orders(self) -> None:
@@ -196,6 +234,31 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("stop_loss_order", symbol, f"submitted {position.quantity} at {quote.bid}")
             )
+
+    def _maybe_flatten(self, positions: dict[str, Position], summary: LoopSummary) -> None:
+        """Close all open positions at the end-of-day cutoff (no overnight holds)."""
+        if not self._at_flatten_time():
+            return
+        for symbol, position in positions.items():
+            if position.quantity <= 0:
+                continue
+            order = self.broker.submit_order(
+                symbol, OrderSide.SELL, position.quantity, OrderType.MARKET,
+            )
+            summary.exits.append(order)
+            summary.events.append(
+                LoopEvent("eod_flatten", symbol, f"market-sold {position.quantity} before close")
+            )
+            self.exit_plans.pop(symbol, None)
+
+    def _at_flatten_time(self) -> bool:
+        now = self._now()
+        session = get_trading_session(now.date())
+        return session is not None and now >= session.exit_time
+
+    def _persist_plans(self) -> None:
+        if self.state_store is not None:
+            self.state_store.save(self.exit_plans)
 
     def _maybe_enter(self, summary: LoopSummary) -> None:
         if not self._market_open():
