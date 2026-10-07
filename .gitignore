@@ -159,6 +159,11 @@ venv/
 *.env.bak
 webull_*_sdk.log
 webull_*_sdk.log.*
+
+# Bot runtime artifacts
+bot_state.json
+bot.log
+bot.log.*
 ENV/
 env.bak/
 venv.bak/
