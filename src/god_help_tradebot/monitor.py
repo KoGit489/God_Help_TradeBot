@@ -99,6 +99,9 @@ class MonitorLoop:
         self._events_client: Any | None = None
         self._market_news: Any | None = None
         self._consecutive_errors = 0
+        # Symbols whose exit was rejected for the current session (e.g. not
+        # eligible for overnight trading); retried when the session changes.
+        self._exit_blocked: dict[str, str] = {}
 
         # Restore persisted exit plans so a restart never strands a position.
         if self.state_store is not None and not self.exit_plans:
@@ -217,36 +220,60 @@ class MonitorLoop:
             return
         if not self._can_trade_now():
             return
+        session = self._exit_trading_session()
+        if self._exit_blocked.get(symbol) == session:
+            return  # already rejected this session; retry when the session changes
 
-        if quote.bid >= plan.target_price:
-            order = self.broker.submit_order(
-                symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
-                limit_price=float(plan.target_price),
-                trading_session=self._exit_trading_session(),
-            )
-            summary.exits.append(order)
-            summary.events.append(
-                LoopEvent("take_profit_order", symbol, f"submitted {position.quantity} at {quote.bid}")
-            )
-        elif quote.bid <= plan.stop_price:
-            # Webull's night session only accepts LIMIT orders; convert the stop
-            # into a limit sell at the stop price outside regular hours.
-            if self._market_open():
-                order = self.broker.submit_order(
-                    symbol, OrderSide.SELL, position.quantity, OrderType.STOP,
-                    stop_price=float(plan.stop_price),
-                    trading_session="CORE",
-                )
-            else:
+        try:
+            if quote.bid >= plan.target_price:
                 order = self.broker.submit_order(
                     symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
-                    limit_price=float(plan.stop_price),
-                    trading_session="NIGHT",
+                    limit_price=float(plan.target_price),
+                    trading_session=session,
                 )
-            summary.exits.append(order)
-            summary.events.append(
-                LoopEvent("stop_loss_order", symbol, f"submitted {position.quantity} at {quote.bid}")
-            )
+                summary.exits.append(order)
+                summary.events.append(
+                    LoopEvent("take_profit_order", symbol, f"submitted {position.quantity} at {quote.bid}")
+                )
+                self._exit_blocked.pop(symbol, None)
+            elif quote.bid <= plan.stop_price:
+                # Webull's night session only accepts LIMIT orders; convert the stop
+                # into a limit sell at the stop price outside regular hours.
+                if self._market_open():
+                    order = self.broker.submit_order(
+                        symbol, OrderSide.SELL, position.quantity, OrderType.STOP,
+                        stop_price=float(plan.stop_price),
+                        trading_session="CORE",
+                    )
+                else:
+                    order = self.broker.submit_order(
+                        symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
+                        limit_price=float(plan.stop_price),
+                        trading_session="NIGHT",
+                    )
+                summary.exits.append(order)
+                summary.events.append(
+                    LoopEvent("stop_loss_order", symbol, f"submitted {position.quantity} at {quote.bid}")
+                )
+                self._exit_blocked.pop(symbol, None)
+        except Exception as exc:
+            if self._is_deterministic_rejection(exc):
+                self._exit_blocked[symbol] = session
+                summary.events.append(
+                    LoopEvent("exit_blocked", symbol, f"{session} rejected exit; will retry next session")
+                )
+            else:
+                raise
+
+    @staticmethod
+    def _is_deterministic_rejection(exc: Exception) -> bool:
+        """HTTP 417 rejections (session/eligibility/params) won't fix themselves this cycle."""
+        status = getattr(exc, "http_status", None)
+        if status is None:
+            status = getattr(exc, "status_code", None)
+        if status is None:
+            return "417" in str(exc) or "OPENAPI_" in str(exc)
+        return int(status) == 417
 
     def _can_trade_now(self) -> bool:
         """True during regular hours or the night session; false in dead zones."""

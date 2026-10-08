@@ -138,6 +138,42 @@ def test_monitor_does_not_flatten_midday() -> None:
     assert not any(e.kind == "eod_flatten" for e in summary.events)
 
 
+# --- Exit blocking on deterministic rejections -------------------------------
+
+class _RejectedBroker(PaperBroker):
+    """Raises a 417-style rejection on every sell, like an ineligible symbol."""
+
+    def submit_order(self, symbol, side, quantity, order_type, **kwargs):
+        if side.value == "SELL":
+            raise RuntimeError("HTTP Status: 417, Code: OPENAPI_OVERNIGHT_CANT_SUPPORT_TICKER")
+        return super().submit_order(symbol, side, quantity, order_type, **kwargs)
+
+
+def test_monitor_blocks_rejected_exit_without_halting() -> None:
+    broker = _RejectedBroker(10_000)
+    broker.positions["NIVF"] = Position(quantity=100, average_price=Decimal("0.10"))
+    broker.last_quotes["NIVF"] = Quote("NIVF", Decimal("0.08"), Decimal("0.09"), Decimal("0.08"))
+    loop = MonitorLoop(
+        broker,
+        exit_plans={"NIVF": ExitPlan("NIVF", 100, Decimal("0.50"), Decimal("0.09"))},
+        now_provider=_open_session_now,
+        flatten_before_close=False,
+        error_backoff_seconds=0,
+    )
+
+    summary = loop.run_once()
+    assert any(e.kind == "exit_blocked" for e in summary.events)
+
+    # Second poll in the same session: skips the rejected exit, no halt.
+    summary2 = loop.run_once()
+    assert not any(e.kind == "error" for e in summary2.events)
+    assert "NIVF" in loop._exit_blocked
+
+
+def _open_session_now() -> datetime:
+    return datetime(2026, 10, 7, 11, 0, tzinfo=EASTERN)
+
+
 # --- Config file -------------------------------------------------------------
 
 def test_load_bot_config_defaults_when_no_file(tmp_path, monkeypatch) -> None:
