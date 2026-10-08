@@ -1,4 +1,4 @@
-from decimal import Decimal
+﻿from decimal import Decimal
 
 from god_help_tradebot import OrderSide, OrderStatus, OrderType, PaperBroker, Quote
 from god_help_tradebot.broker import BrokerAdapter, OrderPreview, WebullSandboxBroker, WebullSdkSession
@@ -283,7 +283,7 @@ def test_webull_submit_order_places_sandbox_order_with_correct_payload() -> None
     assert payload["instrument_type"] == "EQUITY"
     assert payload["market"] == "US"
     assert payload["order_type"] == "LIMIT"
-    assert payload["limit_price"] == "0.11"
+    assert payload["limit_price"] == "0.1100"
     assert payload["quantity"] == "5"
     assert payload["side"] == "BUY"
     assert payload["time_in_force"] == "DAY"
@@ -304,7 +304,7 @@ def test_webull_submit_order_maps_stop_to_stop_loss() -> None:
 
     payload = order_v3.placed[0][1][0]
     assert payload["order_type"] == "STOP_LOSS"
-    assert payload["stop_price"] == "0.09"
+    assert payload["stop_price"] == "0.0900"
     assert "limit_price" not in payload
     assert order.stop_price == Decimal("0.09")
 

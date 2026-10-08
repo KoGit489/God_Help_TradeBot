@@ -88,6 +88,13 @@ WEBULL_STATUS_MAP = {
 }
 
 
+def _round_to_tick(price: float | Decimal) -> Decimal:
+    """Round a price to Webull's tick size: 0.01 for >= $1, 0.0001 for sub-$1."""
+    value = Decimal(str(price))
+    tick = Decimal("0.01") if value >= 1 else Decimal("0.0001")
+    return value.quantize(tick)
+
+
 @dataclass
 class WebullSdkSession:
     """Authenticated Webull SDK clients bound to the sandbox endpoint."""
@@ -287,9 +294,9 @@ class WebullSandboxBroker:
             "entrust_type": QTY_ENTRUST,
         }
         if order_type is OrderType.LIMIT:
-            payload["limit_price"] = str(Decimal(str(limit_price)))
+            payload["limit_price"] = str(_round_to_tick(limit_price))
         if order_type is OrderType.STOP:
-            payload["stop_price"] = str(Decimal(str(stop_price)))
+            payload["stop_price"] = str(_round_to_tick(stop_price))
         return payload
 
     def submit_order(
@@ -381,7 +388,7 @@ class WebullSandboxBroker:
             "client_order_id": uuid.uuid4().hex,
             "combo_type": "STOP_PROFIT",
             "order_type": "LIMIT",
-            "limit_price": str(Decimal(str(target_price))),
+            "limit_price": str(_round_to_tick(target_price)),
             "side": "SELL",
         }
         stop_loss = {
@@ -389,7 +396,7 @@ class WebullSandboxBroker:
             "client_order_id": uuid.uuid4().hex,
             "combo_type": "STOP_LOSS",
             "order_type": "STOP_LOSS",
-            "stop_price": str(Decimal(str(stop_price))),
+            "stop_price": str(_round_to_tick(stop_price)),
             "side": "SELL",
         }
 
