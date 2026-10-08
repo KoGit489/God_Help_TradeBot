@@ -70,6 +70,7 @@ class PaperBroker:
         *,
         limit_price: float | None = None,
         stop_price: float | None = None,
+        trading_session: str = "CORE",
     ) -> PaperOrder:
         if not symbol.strip():
             raise ValueError("symbol is required")

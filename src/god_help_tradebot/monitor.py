@@ -215,11 +215,14 @@ class MonitorLoop:
         quote = self.broker.get_latest_quote(symbol)
         if quote is None:
             return
+        if not self._can_trade_now():
+            return
 
         if quote.bid >= plan.target_price:
             order = self.broker.submit_order(
                 symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
                 limit_price=float(plan.target_price),
+                trading_session=self._exit_trading_session(),
             )
             summary.exits.append(order)
             summary.events.append(
@@ -229,11 +232,27 @@ class MonitorLoop:
             order = self.broker.submit_order(
                 symbol, OrderSide.SELL, position.quantity, OrderType.STOP,
                 stop_price=float(plan.stop_price),
+                trading_session=self._exit_trading_session(),
             )
             summary.exits.append(order)
             summary.events.append(
                 LoopEvent("stop_loss_order", symbol, f"submitted {position.quantity} at {quote.bid}")
             )
+
+    def _can_trade_now(self) -> bool:
+        """True during regular hours or the night session; false in dead zones."""
+        return self._market_open() or self._in_night_session()
+
+    def _in_night_session(self) -> bool:
+        """Webull's night session runs 8 PM - 4 AM ET on trading days."""
+        now = self._now()
+        if get_trading_session(now.date()) is None:
+            return False
+        minutes = now.hour * 60 + now.minute
+        return minutes >= 20 * 60 or minutes < 4 * 60
+
+    def _exit_trading_session(self) -> str:
+        return "CORE" if self._market_open() else "NIGHT"
 
     def _maybe_flatten(self, positions: dict[str, Position], summary: LoopSummary) -> None:
         """Close all open positions at the end-of-day cutoff (no overnight holds)."""

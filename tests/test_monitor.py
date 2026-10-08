@@ -26,6 +26,11 @@ def _closed_market_now() -> datetime:
     return datetime(2026, 10, 7, 18, 0, tzinfo=EASTERN)
 
 
+def _night_session_now() -> datetime:
+    # 9 PM ET is inside Webull's night session (8 PM - 4 AM), when trading is allowed.
+    return datetime(2026, 10, 7, 21, 0, tzinfo=EASTERN)
+
+
 def _snapshot(symbol: str, price: float, day_low: float, day_high: float) -> MarketSnapshot:
     return MarketSnapshot(
         symbol=symbol,
@@ -51,7 +56,7 @@ def test_monitor_exits_at_target_price() -> None:
     quote = Quote("NIVF", Decimal("0.15"), Decimal("0.16"), Decimal("0.15"))
     broker = _broker_with_position("NIVF", 100, 0.10, quote)
     plan = ExitPlan(symbol="NIVF", quantity=100, target_price=Decimal("0.15"), stop_price=Decimal("0.09"))
-    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_closed_market_now, flatten_before_close=False)
+    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_open_market_now, flatten_before_close=False)
 
     summary = loop.run_once()
 
@@ -64,7 +69,7 @@ def test_monitor_exits_at_stop_price() -> None:
     quote = Quote("NIVF", Decimal("0.08"), Decimal("0.09"), Decimal("0.08"))
     broker = _broker_with_position("NIVF", 100, 0.10, quote)
     plan = ExitPlan(symbol="NIVF", quantity=100, target_price=Decimal("0.15"), stop_price=Decimal("0.09"))
-    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_closed_market_now, flatten_before_close=False)
+    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_open_market_now, flatten_before_close=False)
 
     summary = loop.run_once()
 
@@ -77,7 +82,7 @@ def test_monitor_holds_within_bracket() -> None:
     quote = Quote("NIVF", Decimal("0.11"), Decimal("0.12"), Decimal("0.11"))
     broker = _broker_with_position("NIVF", 100, 0.10, quote)
     plan = ExitPlan(symbol="NIVF", quantity=100, target_price=Decimal("0.15"), stop_price=Decimal("0.09"))
-    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_closed_market_now, flatten_before_close=False)
+    loop = MonitorLoop(broker, exit_plans={"NIVF": plan}, now_provider=_night_session_now, flatten_before_close=False)
 
     summary = loop.run_once()
 
@@ -88,7 +93,7 @@ def test_monitor_holds_within_bracket() -> None:
 def test_monitor_skips_position_without_exit_plan() -> None:
     quote = Quote("NIVF", Decimal("0.08"), Decimal("0.09"), Decimal("0.08"))
     broker = _broker_with_position("NIVF", 100, 0.10, quote)
-    loop = MonitorLoop(broker, now_provider=_closed_market_now, flatten_before_close=False)
+    loop = MonitorLoop(broker, now_provider=_night_session_now, flatten_before_close=False)
 
     summary = loop.run_once()
 
@@ -158,7 +163,7 @@ def test_monitor_run_respects_max_polls() -> None:
 
 def test_monitor_run_once_returns_cumulative_summary() -> None:
     broker = PaperBroker(10_000)
-    loop = MonitorLoop(broker, now_provider=_closed_market_now, flatten_before_close=False)
+    loop = MonitorLoop(broker, now_provider=_night_session_now, flatten_before_close=False)
     summary = LoopSummary()
 
     loop.run_once(summary)
