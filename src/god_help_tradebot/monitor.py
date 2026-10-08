@@ -371,7 +371,9 @@ class MonitorLoop:
         snapshot = profiled.candidate.snapshot
         stop_price = Decimal(str(snapshot.day_low)) * Decimal("0.99")
         try:
-            plan = build_trade_plan(snapshot.price, float(stop_price), self.config)
+            plan = build_trade_plan(
+                snapshot.price, float(stop_price), self.config, account_value=self._account_value()
+            )
         except ValueError:
             return
         order = self.broker.submit_order(
@@ -449,6 +451,17 @@ class MonitorLoop:
             except Exception:
                 self._market_news = None
         return self._market_news
+
+    def _account_value(self) -> float | None:
+        """Buying power for account-percentage sizing, when the broker supports it."""
+        getter = getattr(self.broker, "get_buying_power", None)
+        if not callable(getter):
+            return None
+        try:
+            value = getter()
+        except Exception:
+            return None
+        return float(value) if value is not None else None
 
     def _market_open(self) -> bool:
         now = self._now()

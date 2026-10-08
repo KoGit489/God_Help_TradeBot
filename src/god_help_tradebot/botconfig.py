@@ -26,6 +26,7 @@ _TUNABLES = {
     "min_relative_volume": float,
     "min_average_volume": int,
     "max_spread_percent": float,
+    "position_pct_of_account": float,
 }
 
 

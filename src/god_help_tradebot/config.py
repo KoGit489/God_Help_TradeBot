@@ -15,6 +15,9 @@ class BotConfig:
     min_average_volume: int = 100_000
     max_spread_percent: float = 1.0
     paper_mode: bool = True
+    # When > 0, deploy this fraction of the account's value per trade instead of
+    # the fixed dollar caps. The stop distance then defines the dollar risk.
+    position_pct_of_account: float = 0.0
 
     def __post_init__(self) -> None:
         if self.max_symbol_price <= 0:
@@ -33,3 +36,5 @@ class BotConfig:
             raise ValueError("min_average_volume must be positive")
         if self.max_spread_percent <= 0:
             raise ValueError("max_spread_percent must be positive")
+        if not 0.0 <= self.position_pct_of_account <= 1.0:
+            raise ValueError("position_pct_of_account must be between 0 and 1")

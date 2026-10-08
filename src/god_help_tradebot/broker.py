@@ -559,6 +559,18 @@ class WebullSandboxBroker:
             order.status = OrderStatus.CANCELED
         return order
 
+    def get_buying_power(self) -> Decimal | None:
+        """Current cash buying power for the sandbox account, if available."""
+        self._require_session()
+        response = self.session.trade_client.account_v2.get_account_balance(self._resolve_account_id())
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return None
+        assets = payload.get("account_currency_assets", [])
+        record = assets[0] if assets and isinstance(assets[0], dict) else payload
+        value = record.get("buying_power") or record.get("cash_balance") or record.get("net_liquidation_value")
+        return Decimal(str(value)) if value not in (None, "") else None
+
     def get_order_status(self, client_order_id: str) -> dict[str, Any] | None:
         """Fetch one sandbox order's live status record by client_order_id."""
         self._require_session()
