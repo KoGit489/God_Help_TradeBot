@@ -229,11 +229,20 @@ class MonitorLoop:
                 LoopEvent("take_profit_order", symbol, f"submitted {position.quantity} at {quote.bid}")
             )
         elif quote.bid <= plan.stop_price:
-            order = self.broker.submit_order(
-                symbol, OrderSide.SELL, position.quantity, OrderType.STOP,
-                stop_price=float(plan.stop_price),
-                trading_session=self._exit_trading_session(),
-            )
+            # Webull's night session only accepts LIMIT orders; convert the stop
+            # into a limit sell at the stop price outside regular hours.
+            if self._market_open():
+                order = self.broker.submit_order(
+                    symbol, OrderSide.SELL, position.quantity, OrderType.STOP,
+                    stop_price=float(plan.stop_price),
+                    trading_session="CORE",
+                )
+            else:
+                order = self.broker.submit_order(
+                    symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
+                    limit_price=float(plan.stop_price),
+                    trading_session="NIGHT",
+                )
             summary.exits.append(order)
             summary.events.append(
                 LoopEvent("stop_loss_order", symbol, f"submitted {position.quantity} at {quote.bid}")
