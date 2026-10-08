@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from .broker import WebullSandboxBroker, US_STOCK_CATEGORY
 from .news import NewsReport, fetch_news_sentiment
+from .patterns import PatternReport, pattern_score_for_symbol
 from .worldnews import MarketNewsReport, fetch_market_news, market_adjustment
 
 
@@ -26,6 +27,8 @@ class ConfirmationReport:
     news_article_count: int = 0
     market_score: float | None = None
     market_article_count: int = 0
+    pattern_score: float | None = None
+    pattern_name: str | None = None
     passed: bool = False
 
 
@@ -124,6 +127,8 @@ def confirm_candidate(
     include_news: bool = True,
     news_provider: Callable[[str], NewsReport] | None = None,
     market_news: MarketNewsReport | None = None,
+    pattern_provider: Callable[[str], PatternReport] | None = None,
+    include_patterns: bool = True,
 ) -> ConfirmationReport:
     """Combine flow, analyst, news, and market-backdrop signals into a pass/fail.
 
@@ -160,13 +165,29 @@ def confirm_candidate(
             # A hostile macro backdrop raises the bar; a favorable one lowers it.
             threshold = round(min_score - market_adjustment(market), 4)
 
-    if news_score is not None:
-        # Flow remains the anchor; analyst coverage and news coverage add
-        # independent confirmation. News carries the least weight because
-        # penny-stock coverage is sparse and noisy.
-        score = round((flow_score * 0.55) + (rating_score * 0.25) + (news_score * 0.20), 4)
-    else:
-        score = round((flow_score * 0.7) + (rating_score * 0.3), 4)
+    pattern_score: float | None = None
+    pattern_name: str | None = None
+    if include_patterns:
+        provider = pattern_provider or (lambda s: pattern_score_for_symbol(broker, s))
+        try:
+            pattern = provider(symbol)
+            if pattern.has_data and pattern.pattern is not None:
+                pattern_score = pattern.score
+                pattern_name = pattern.pattern
+        except Exception:
+            pattern_score = None
+
+    # Blend whichever signals are present, normalizing weights to sum to 1.
+    # Flow leads, then analysts, news, and chart pattern.
+    weighted = [
+        (flow_score, 0.45),
+        (rating_score, 0.20),
+        (news_score, 0.20),
+        (pattern_score, 0.15),
+    ]
+    present = [(value, weight) for value, weight in weighted if value is not None]
+    total_weight = sum(weight for _, weight in present)
+    score = round(sum(value * weight for value, weight in present) / total_weight, 4) if present else 0.5
 
     return ConfirmationReport(
         symbol=symbol.upper(),
@@ -178,6 +199,8 @@ def confirm_candidate(
         news_article_count=news_articles,
         market_score=market_score,
         market_article_count=market_articles,
+        pattern_score=pattern_score,
+        pattern_name=pattern_name,
         passed=score >= threshold,
     )
 

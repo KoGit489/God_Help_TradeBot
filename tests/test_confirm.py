@@ -285,4 +285,4 @@ def test_confirm_candidate_news_failure_falls_back_to_two_signal_score() -> None
     report = confirm_candidate(broker, "GOW", min_score=0.5, news_provider=_failing_news)
 
     assert report.news_score is None
-    assert report.score == round((0.7 * 0.7) + (0.75 * 0.3), 4)
+    assert report.score == round(((0.7 * 0.45) + (0.75 * 0.20)) / 0.65, 4)

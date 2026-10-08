@@ -8,6 +8,7 @@ from .confirm import ConfirmationReport, confirm_candidate
 from .monitor import ExitPlan, LoopEvent, LoopSummary, MonitorLoop, build_exit_plan
 from .news import NewsReport, fetch_news_sentiment
 from .paper import OrderSide, OrderStatus, OrderType, PaperBroker, PaperOrder, Position, Quote
+from .patterns import PatternReport, detect_pattern, pattern_score_for_symbol
 from .risk import TradePlan, build_trade_plan
 from .runner import run_bot
 from .screen import MarketSnapshot, RankedCandidate, screen_candidates
@@ -25,6 +26,7 @@ __all__ = [
 	"MonitorLoop",
 	"NewsReport",
 	"OrderPreview",
+	"PatternReport",
 	"WebullSdkSession",
 	"WebullSessionConfig",
 	"load_webull_config",
@@ -44,9 +46,11 @@ __all__ = [
 	"build_exit_plan",
 	"build_trade_plan",
 	"confirm_candidate",
+	"detect_pattern",
 	"fetch_market_news",
 	"fetch_news_sentiment",
 	"load_bot_config",
+	"pattern_score_for_symbol",
 	"run_bot",
 	"screen_candidates",
 ]
