@@ -102,6 +102,10 @@ class MonitorLoop:
         # Symbols whose exit was rejected for the current session (e.g. not
         # eligible for overnight trading); retried when the session changes.
         self._exit_blocked: dict[str, str] = {}
+        # Symbols already flattened at today's cutoff; prevents duplicate sells
+        # while the first market order is still settling.
+        self._flattened: set[str] = set()
+        self._flattened_date: Any | None = None
 
         # Restore persisted exit plans so a restart never strands a position.
         if self.state_store is not None and not self.exit_plans:
@@ -294,8 +298,12 @@ class MonitorLoop:
         """Close all open positions at the end-of-day cutoff (no overnight holds)."""
         if not self._at_flatten_time():
             return
+        today = self._now().date()
+        if self._flattened_date != today:
+            self._flattened.clear()
+            self._flattened_date = today
         for symbol, position in positions.items():
-            if position.quantity <= 0:
+            if position.quantity <= 0 or symbol in self._flattened:
                 continue
             order = self.broker.submit_order(
                 symbol, OrderSide.SELL, position.quantity, OrderType.MARKET,
@@ -304,6 +312,7 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("eod_flatten", symbol, f"market-sold {position.quantity} before close")
             )
+            self._flattened.add(symbol)
             self.exit_plans.pop(symbol, None)
 
     def _at_flatten_time(self) -> bool:
