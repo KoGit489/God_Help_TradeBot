@@ -22,6 +22,9 @@ class BotConfig:
     allow_shorts: bool = False
     # Paradox mode: short the bullish picks instead of buying them (margin required).
     flip_entries: bool = False
+    # Bracket distances from the entry price (fixed percentages).
+    stop_pct: float = 0.10
+    target_pct: float = 0.30
 
     def __post_init__(self) -> None:
         if self.max_symbol_price <= 0:
@@ -42,3 +45,7 @@ class BotConfig:
             raise ValueError("max_spread_percent must be positive")
         if not 0.0 <= self.position_pct_of_account <= 1.0:
             raise ValueError("position_pct_of_account must be between 0 and 1")
+        if not 0.0 < self.stop_pct < 1.0:
+            raise ValueError("stop_pct must be between 0 and 1")
+        if not 0.0 < self.target_pct < 1.0:
+            raise ValueError("target_pct must be between 0 and 1")

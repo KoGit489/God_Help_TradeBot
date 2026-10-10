@@ -238,3 +238,64 @@ def test_paradox_off_buys_momentum_pick() -> None:
 
     assert summary.entries[0].side is OrderSide.BUY
     assert loop.exit_plans["GOW"].direction == "long"
+
+
+def test_fixed_pct_bracket_on_long_entry() -> None:
+    broker = PaperBroker(10_000)
+    broker.last_quotes["GOW"] = Quote("GOW", Decimal("2.99"), Decimal("3.01"), Decimal("3.0"))
+    snapshot = _fade_snapshot("GOW", 3.00, 5.0, 2.80, 3.20)
+    loop = MonitorLoop(
+        broker,
+        BotConfig(),
+        snapshot_provider=lambda: [snapshot],
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    loop.run_once()
+
+    plan = loop.exit_plans["GOW"]
+    assert plan.stop_price == Decimal("3.00") * Decimal("0.9")   # 10% below entry
+    assert plan.target_price == Decimal("3.00") * Decimal("1.3")  # 30% above entry
+
+
+def test_fixed_pct_bracket_on_short_entry() -> None:
+    broker = PaperBroker(10_000)
+    broker.last_quotes["GOW"] = Quote("GOW", Decimal("2.99"), Decimal("3.01"), Decimal("3.0"))
+    snapshot = _fade_snapshot("GOW", 3.00, 5.0, 2.80, 3.20)
+    loop = MonitorLoop(
+        broker,
+        BotConfig(flip_entries=True),
+        snapshot_provider=lambda: [snapshot],
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    loop.run_once()
+
+    plan = loop.exit_plans["GOW"]
+    assert plan.direction == "short"
+    assert plan.stop_price == Decimal("3.00") * Decimal("1.1")   # 10% above entry
+    assert plan.target_price == Decimal("3.00") * Decimal("0.7")  # 30% below entry
+
+
+def test_pct_bracket_is_configurable() -> None:
+    broker = PaperBroker(10_000)
+    broker.last_quotes["GOW"] = Quote("GOW", Decimal("2.99"), Decimal("3.01"), Decimal("3.0"))
+    snapshot = _fade_snapshot("GOW", 3.00, 5.0, 2.80, 3.20)
+    loop = MonitorLoop(
+        broker,
+        BotConfig(stop_pct=0.05, target_pct=0.15),
+        snapshot_provider=lambda: [snapshot],
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    loop.run_once()
+
+    plan = loop.exit_plans["GOW"]
+    assert plan.stop_price == Decimal("3.00") * Decimal("0.95")
+    assert plan.target_price == Decimal("3.00") * Decimal("1.15")

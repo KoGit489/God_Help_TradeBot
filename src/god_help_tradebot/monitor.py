@@ -490,7 +490,9 @@ class MonitorLoop:
         if profiled.profile == "fade":
             return  # fade shorts require allow_shorts
         snapshot = profiled.candidate.snapshot
-        stop_price = Decimal(str(snapshot.day_low)) * Decimal("0.99")
+        # Fixed-percentage bracket: works at the open before a day's range exists.
+        entry = Decimal(str(snapshot.price))
+        stop_price = entry * (Decimal("1") - Decimal(str(self.config.stop_pct)))
         try:
             plan = build_trade_plan(
                 snapshot.price, float(stop_price), self.config, account_value=self._account_value()
@@ -522,7 +524,7 @@ class MonitorLoop:
         self.exit_plans[snapshot.symbol] = ExitPlan(
             symbol=snapshot.symbol,
             quantity=plan.quantity,
-            target_price=plan.target_price,
+            target_price=entry * (Decimal("1") + Decimal(str(self.config.target_pct))),
             stop_price=plan.stop_price,
         )
         if is_fallback:
@@ -533,7 +535,9 @@ class MonitorLoop:
     def _enter_short(self, profiled: ProfiledCandidate, summary: LoopSummary) -> None:
         """Enter a short on a fade candidate: stop above, target below."""
         snapshot = profiled.candidate.snapshot
-        stop_price = Decimal(str(snapshot.day_high)) * Decimal("1.01")
+        # Fixed-percentage bracket: stop 10% above entry, target 30% below.
+        entry = Decimal(str(snapshot.price))
+        stop_price = entry * (Decimal("1") + Decimal(str(self.config.stop_pct)))
         try:
             plan = build_short_plan(
                 snapshot.price, float(stop_price), self.config, account_value=self._account_value()
@@ -563,7 +567,7 @@ class MonitorLoop:
         self.exit_plans[snapshot.symbol] = ExitPlan(
             symbol=snapshot.symbol,
             quantity=plan.quantity,
-            target_price=plan.target_price,
+            target_price=entry * (Decimal("1") - Decimal(str(self.config.target_pct))),
             stop_price=plan.stop_price,
             direction="short",
         )
