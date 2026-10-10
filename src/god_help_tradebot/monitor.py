@@ -17,7 +17,7 @@ from .broker import BrokerAdapter, WebullSandboxBroker
 from .config import BotConfig
 from .confirm import confirm_candidate
 from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
-from .risk import TradePlan, build_trade_plan
+from .risk import TradePlan, build_short_plan, build_trade_plan
 from .schedule import TradingSession, get_trading_session
 from .screen import (
     MarketSnapshot,
@@ -25,6 +25,7 @@ from .screen import (
     RankedCandidate,
     best_candidate,
     screen_candidates,
+    screen_fade_candidates,
     screen_prepop_candidates,
 )
 
@@ -37,6 +38,7 @@ class ExitPlan:
     quantity: int
     target_price: Decimal
     stop_price: Decimal
+    direction: str = "long"
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,7 @@ class MonitorLoop:
         flatten_before_close: bool = True,
         max_consecutive_errors: int = 5,
         error_backoff_seconds: float = 30.0,
+        allow_shorts: bool | None = None,
     ) -> None:
         self.broker = broker
         self.config = config or BotConfig()
@@ -96,6 +99,7 @@ class MonitorLoop:
         self.flatten_before_close = flatten_before_close
         self.max_consecutive_errors = max_consecutive_errors
         self.error_backoff_seconds = error_backoff_seconds
+        self.allow_shorts = self.config.allow_shorts if allow_shorts is None else allow_shorts
         self._events_client: Any | None = None
         self._market_news: Any | None = None
         self._consecutive_errors = 0
@@ -138,7 +142,7 @@ class MonitorLoop:
         self._sync_orders()
         positions = self.broker.get_positions()
         for symbol, position in positions.items():
-            if position.quantity > 0:
+            if position.quantity != 0:
                 summary.positions_seen[symbol] = position
                 self._maybe_exit(symbol, position, summary)
 
@@ -217,7 +221,7 @@ class MonitorLoop:
             self._sync_orders()
 
     def _has_open_position(self, positions: dict[str, Position]) -> bool:
-        return any(position.quantity > 0 for position in positions.values())
+        return any(position.quantity != 0 for position in positions.values())
 
     def _maybe_exit(self, symbol: str, position: Position, summary: LoopSummary) -> None:
         plan = self.exit_plans.get(symbol)
@@ -233,6 +237,9 @@ class MonitorLoop:
             return  # already rejected this session; retry when the session changes
 
         try:
+            if plan.direction == "short":
+                self._maybe_exit_short(symbol, position, plan, quote, session, summary)
+                return
             if quote.bid >= plan.target_price:
                 order = self.broker.submit_order(
                     symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
@@ -273,6 +280,52 @@ class MonitorLoop:
             else:
                 raise
 
+    def _maybe_exit_short(
+        self,
+        symbol: str,
+        position: Position,
+        plan: ExitPlan,
+        quote: Quote,
+        session: str,
+        summary: LoopSummary,
+    ) -> None:
+        """Short exit: buy to cover at the ask — target below entry, stop above."""
+        if not self._market_open():
+            return  # shorts can only be covered during regular hours
+        quantity = abs(position.quantity)
+        if quantity < 1:
+            return
+        if quote.ask <= plan.target_price:
+            order = self.broker.submit_order(
+                symbol, OrderSide.BUY, quantity, OrderType.LIMIT,
+                limit_price=float(plan.target_price),
+                trading_session=session,
+            )
+            summary.exits.append(order)
+            summary.events.append(
+                LoopEvent("take_profit_order", symbol, f"covered {quantity} at {quote.ask}")
+            )
+            self._exit_blocked.pop(symbol, None)
+        elif quote.ask >= plan.stop_price:
+            # Night session accepts LIMIT only; use a limit cover at the stop.
+            if self._market_open():
+                order = self.broker.submit_order(
+                    symbol, OrderSide.BUY, quantity, OrderType.STOP,
+                    stop_price=float(plan.stop_price),
+                    trading_session="CORE",
+                )
+            else:
+                order = self.broker.submit_order(
+                    symbol, OrderSide.BUY, quantity, OrderType.LIMIT,
+                    limit_price=float(plan.stop_price),
+                    trading_session="NIGHT",
+                )
+            summary.exits.append(order)
+            summary.events.append(
+                LoopEvent("stop_loss_order", symbol, f"covered {quantity} at {quote.ask}")
+            )
+            self._exit_blocked.pop(symbol, None)
+
     @staticmethod
     def _is_deterministic_rejection(exc: Exception) -> bool:
         """HTTP 417 rejections (session/eligibility/params) won't fix themselves this cycle."""
@@ -307,10 +360,12 @@ class MonitorLoop:
             self._flattened.clear()
             self._flattened_date = today
         for symbol, position in positions.items():
-            if position.quantity <= 0 or symbol in self._flattened:
+            if position.quantity == 0 or symbol in self._flattened:
                 continue
+            # Longs sell to flatten; shorts buy to cover.
+            side = OrderSide.SELL if position.quantity > 0 else OrderSide.BUY
             order = self.broker.submit_order(
-                symbol, OrderSide.SELL, position.quantity, OrderType.MARKET,
+                symbol, side, abs(position.quantity), OrderType.MARKET,
             )
             summary.exits.append(order)
             summary.events.append(
@@ -377,7 +432,7 @@ class MonitorLoop:
         return self._best_odds_fallback(snapshots, summary)
 
     def _ranked_profiles(self, snapshots: list[MarketSnapshot]) -> list[ProfiledCandidate]:
-        """Rank momentum and pre-pop candidates together, best score first."""
+        """Rank momentum, pre-pop, and (when enabled) fade candidates together."""
         combined = [
             ProfiledCandidate(candidate, "momentum")
             for candidate in screen_candidates(snapshots, self.config)
@@ -385,6 +440,11 @@ class MonitorLoop:
             ProfiledCandidate(candidate, "prepop")
             for candidate in screen_prepop_candidates(snapshots, self.config)
         ]
+        if self.allow_shorts:
+            combined += [
+                ProfiledCandidate(candidate, "fade")
+                for candidate in screen_fade_candidates(snapshots, self.config)
+            ]
         combined.sort(key=lambda item: item.candidate.score, reverse=True)
         return combined
 
@@ -421,6 +481,11 @@ class MonitorLoop:
         summary: LoopSummary,
     ) -> None:
         profiled, is_fallback = chosen
+        if profiled.profile == "fade":
+            if not self._market_open():
+                return  # Webull only accepts shorts during regular hours
+            self._enter_short(profiled, summary)
+            return
         snapshot = profiled.candidate.snapshot
         stop_price = Decimal(str(snapshot.day_low)) * Decimal("0.99")
         try:
@@ -461,6 +526,44 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("fallback_entry", snapshot.symbol, "entered on relaxed best-odds gates")
             )
+
+    def _enter_short(self, profiled: ProfiledCandidate, summary: LoopSummary) -> None:
+        """Enter a short on a fade candidate: stop above, target below."""
+        snapshot = profiled.candidate.snapshot
+        stop_price = Decimal(str(snapshot.day_high)) * Decimal("1.01")
+        try:
+            plan = build_short_plan(
+                snapshot.price, float(stop_price), self.config, account_value=self._account_value()
+            )
+        except ValueError:
+            return
+        try:
+            order = self.broker.submit_order(
+                snapshot.symbol, OrderSide.SHORT, plan.quantity, OrderType.MARKET,
+            )
+        except Exception as exc:
+            if self._is_deterministic_rejection(exc):
+                self._entry_blocked.add(snapshot.symbol)
+                summary.events.append(
+                    LoopEvent("entry_blocked", snapshot.symbol, "short entry rejected by platform; skipped for today")
+                )
+                return
+            raise
+        summary.entries.append(order)
+        summary.events.append(
+            LoopEvent(
+                "entry",
+                snapshot.symbol,
+                f"shorted {plan.quantity} [fade] (score {profiled.candidate.score})",
+            )
+        )
+        self.exit_plans[snapshot.symbol] = ExitPlan(
+            symbol=snapshot.symbol,
+            quantity=plan.quantity,
+            target_price=plan.target_price,
+            stop_price=plan.stop_price,
+            direction="short",
+        )
 
     def _first_confirmed(
         self,

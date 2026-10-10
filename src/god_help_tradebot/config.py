@@ -18,6 +18,8 @@ class BotConfig:
     # When > 0, deploy this fraction of the account's value per trade instead of
     # the fixed dollar caps. The stop distance then defines the dollar risk.
     position_pct_of_account: float = 0.0
+    # Allow short entries on fade setups (requires a margin account).
+    allow_shorts: bool = False
 
     def __post_init__(self) -> None:
         if self.max_symbol_price <= 0:

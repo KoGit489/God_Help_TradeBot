@@ -27,6 +27,7 @@ _TUNABLES = {
     "min_average_volume": int,
     "max_spread_percent": float,
     "position_pct_of_account": float,
+    "allow_shorts": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
 }
 
 

@@ -6,6 +6,7 @@ from enum import Enum
 class OrderSide(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
+    SHORT = "SHORT"
 
 
 class OrderType(str, Enum):
@@ -139,31 +140,55 @@ class PaperBroker:
 
     def _fill_price(self, order: PaperOrder, quote: Quote) -> Decimal | None:
         if order.order_type is OrderType.MARKET:
-            return quote.ask if order.side is OrderSide.BUY else quote.bid
+            if order.side is OrderSide.BUY:
+                return quote.ask
+            return quote.bid  # SELL and SHORT both cross at the bid
         if order.order_type is OrderType.LIMIT:
             if order.side is OrderSide.BUY and quote.ask <= order.limit_price:
                 return quote.ask
             if order.side is OrderSide.SELL and quote.bid >= order.limit_price:
+                return quote.bid
+            if order.side is OrderSide.SHORT and quote.bid >= order.limit_price:
                 return quote.bid
         if order.order_type is OrderType.STOP:
             if order.side is OrderSide.BUY and quote.last >= order.stop_price:
                 return quote.ask
             if order.side is OrderSide.SELL and quote.last <= order.stop_price:
                 return quote.bid
+            if order.side is OrderSide.SHORT and quote.last <= order.stop_price:
+                return quote.bid
         return None
 
     def _apply_fill(self, order: PaperOrder, fill_price: Decimal) -> None:
         position = self.positions.setdefault(order.symbol, Position())
         if order.side is OrderSide.BUY:
-            total_cost = fill_price * order.quantity
-            if total_cost > self.cash:
-                raise ValueError("paper account has insufficient cash")
-            self.cash -= total_cost
-            total_quantity = position.quantity + order.quantity
+            if position.quantity < 0:
+                # Buy-to-cover a short position.
+                cover = min(order.quantity, -position.quantity)
+                self.cash -= fill_price * cover
+                self.realized_pnl += (position.average_price - fill_price) * cover
+                position.quantity += cover
+                if position.quantity == 0:
+                    position.average_price = Decimal("0")
+            else:
+                total_cost = fill_price * order.quantity
+                if total_cost > self.cash:
+                    raise ValueError("paper account has insufficient cash")
+                self.cash -= total_cost
+                total_quantity = position.quantity + order.quantity
+                position.average_price = (
+                    (position.average_price * position.quantity) + total_cost
+                ) / total_quantity
+                position.quantity = total_quantity
+        elif order.side is OrderSide.SHORT:
+            # Open/add to a short: proceeds credited, quantity goes negative.
+            self.cash += fill_price * order.quantity
+            existing = -position.quantity
+            total_quantity = existing + order.quantity
             position.average_price = (
-                (position.average_price * position.quantity) + total_cost
+                (position.average_price * existing) + (fill_price * order.quantity)
             ) / total_quantity
-            position.quantity = total_quantity
+            position.quantity = -total_quantity
         else:
             if order.quantity > position.quantity:
                 raise ValueError("paper account cannot sell more than the position")
@@ -180,7 +205,7 @@ class PaperBroker:
             if (
                 order.order_id != filled_order.order_id
                 and order.symbol == filled_order.symbol
-                and order.side is OrderSide.SELL
+                and order.side in (OrderSide.SELL, OrderSide.BUY)
                 and order.status is OrderStatus.OPEN
             ):
                 order.status = OrderStatus.CANCELED

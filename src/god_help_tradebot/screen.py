@@ -136,3 +136,41 @@ def best_candidate(
     if top_momentum.score >= top_prepop.score:
         return ProfiledCandidate(top_momentum, "momentum")
     return ProfiledCandidate(top_prepop, "prepop")
+
+
+# --- Fade (short) profile ---------------------------------------------------
+# Overextended gainers rolling off their highs: popped big, then slid into the
+# lower half of the day's range. Classic penny-stock fade setup.
+
+FADE_MIN_CHANGE_PERCENT = 10.0
+FADE_MAX_RANGE_POSITION = 0.4
+
+
+def screen_fade_candidates(
+    snapshots: list[MarketSnapshot],
+    config: BotConfig,
+) -> list[RankedCandidate]:
+    """Rank overextended gainers that are fading off their highs (short setups)."""
+    candidates = [s for s in snapshots if _passes_fade_filters(s, config)]
+    ranked = [RankedCandidate(snapshot, _fade_score(snapshot)) for snapshot in candidates]
+    return sorted(ranked, key=lambda candidate: candidate.score, reverse=True)
+
+
+def _passes_fade_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
+    return (
+        bool(snapshot.symbol.strip())
+        and 0 < snapshot.price <= config.max_symbol_price
+        and snapshot.change_percent >= FADE_MIN_CHANGE_PERCENT
+        and snapshot.volume >= config.min_average_volume
+        and 0 < snapshot.bid <= snapshot.ask
+        and snapshot.spread_percent <= config.max_spread_percent
+        and 0 <= snapshot.range_position <= FADE_MAX_RANGE_POSITION
+    )
+
+
+def _fade_score(snapshot: MarketSnapshot) -> float:
+    """Score the fade: bigger prior pop + deeper slide off the high = better short."""
+    pop = min(snapshot.change_percent / 50, 1.0)
+    slide = 1.0 - snapshot.range_position
+    volume = min(snapshot.relative_volume / 10, 1.0)
+    return round((pop * 0.4) + (slide * 0.4) + (volume * 0.2), 4)
