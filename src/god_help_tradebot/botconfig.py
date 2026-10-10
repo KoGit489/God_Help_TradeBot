@@ -28,6 +28,7 @@ _TUNABLES = {
     "max_spread_percent": float,
     "position_pct_of_account": float,
     "allow_shorts": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
+    "flip_entries": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
 }
 
 

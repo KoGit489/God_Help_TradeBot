@@ -481,11 +481,14 @@ class MonitorLoop:
         summary: LoopSummary,
     ) -> None:
         profiled, is_fallback = chosen
-        if profiled.profile == "fade":
+        wants_short = profiled.profile == "fade" or self.config.flip_entries
+        if wants_short and (self.allow_shorts or self.config.flip_entries):
             if not self._market_open():
                 return  # Webull only accepts shorts during regular hours
             self._enter_short(profiled, summary)
             return
+        if profiled.profile == "fade":
+            return  # fade shorts require allow_shorts
         snapshot = profiled.candidate.snapshot
         stop_price = Decimal(str(snapshot.day_low)) * Decimal("0.99")
         try:
@@ -554,7 +557,7 @@ class MonitorLoop:
             LoopEvent(
                 "entry",
                 snapshot.symbol,
-                f"shorted {plan.quantity} [fade] (score {profiled.candidate.score})",
+                f"shorted {plan.quantity} [{profiled.profile}{'-flipped' if profiled.profile != 'fade' else ''}] (score {profiled.candidate.score})",
             )
         )
         self.exit_plans[snapshot.symbol] = ExitPlan(

@@ -20,6 +20,8 @@ class BotConfig:
     position_pct_of_account: float = 0.0
     # Allow short entries on fade setups (requires a margin account).
     allow_shorts: bool = False
+    # Paradox mode: short the bullish picks instead of buying them (margin required).
+    flip_entries: bool = False
 
     def __post_init__(self) -> None:
         if self.max_symbol_price <= 0:
