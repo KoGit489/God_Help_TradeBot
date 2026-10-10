@@ -3,6 +3,11 @@ from decimal import Decimal, ROUND_DOWN
 
 from .config import BotConfig
 
+# Webull platform rules: market orders need buying power 2% above the estimated
+# cost during regular hours, and a single order must stay below 200,000 shares.
+MARKET_ORDER_HEADROOM = Decimal("0.98")
+MAX_ORDER_QUANTITY = 199_999
+
 
 @dataclass(frozen=True)
 class TradePlan:
@@ -31,7 +36,11 @@ def build_trade_plan(
     if config.position_pct_of_account > 0 and account_value is not None:
         # Account-percentage mode: deploy that fraction of the account; the stop
         # distance defines the dollar risk, and the bracket caps the downside.
-        max_value = Decimal(str(account_value)) * Decimal(str(config.position_pct_of_account))
+        max_value = (
+            Decimal(str(account_value))
+            * Decimal(str(config.position_pct_of_account))
+            * MARKET_ORDER_HEADROOM
+        )
         quantity = int((max_value / entry).to_integral_value(rounding=ROUND_DOWN))
     else:
         risk_per_share = entry - stop
@@ -40,6 +49,7 @@ def build_trade_plan(
         max_value = Decimal(str(config.max_position_value_usd))
         quantity_by_value = int((max_value / entry).to_integral_value(rounding=ROUND_DOWN))
         quantity = min(quantity_by_risk, quantity_by_value)
+    quantity = min(quantity, MAX_ORDER_QUANTITY)
     if quantity < 1:
         raise ValueError("configured limits do not allow one share at this stop distance")
 

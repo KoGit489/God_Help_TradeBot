@@ -106,6 +106,10 @@ class MonitorLoop:
         # while the first market order is still settling.
         self._flattened: set[str] = set()
         self._flattened_date: Any | None = None
+        # Candidates whose entry was rejected today (e.g. platform limits); the
+        # loop moves to the next candidate instead of retrying the same one.
+        self._entry_blocked: set[str] = set()
+        self._entry_blocked_date: Any | None = None
 
         # Restore persisted exit plans so a restart never strands a position.
         if self.state_store is not None and not self.exit_plans:
@@ -327,7 +331,11 @@ class MonitorLoop:
     def _maybe_enter(self, summary: LoopSummary) -> None:
         if not self._market_open():
             return
-        snapshots = self._gather_snapshots()
+        today = self._now().date()
+        if self._entry_blocked_date != today:
+            self._entry_blocked.clear()
+            self._entry_blocked_date = today
+        snapshots = [s for s in self._gather_snapshots() if s.symbol not in self._entry_blocked]
         if not snapshots:
             return
 
@@ -421,9 +429,20 @@ class MonitorLoop:
             )
         except ValueError:
             return
-        order = self.broker.submit_order(
-            snapshot.symbol, OrderSide.BUY, plan.quantity, OrderType.MARKET,
-        )
+        try:
+            order = self.broker.submit_order(
+                snapshot.symbol, OrderSide.BUY, plan.quantity, OrderType.MARKET,
+            )
+        except Exception as exc:
+            if self._is_deterministic_rejection(exc):
+                # Platform rejected the entry (buying-power headroom, quantity
+                # cap, eligibility). Block this candidate for today and move on.
+                self._entry_blocked.add(snapshot.symbol)
+                summary.events.append(
+                    LoopEvent("entry_blocked", snapshot.symbol, "entry rejected by platform; skipped for today")
+                )
+                return
+            raise
         summary.entries.append(order)
         summary.events.append(
             LoopEvent(

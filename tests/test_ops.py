@@ -174,6 +174,36 @@ def _open_session_now() -> datetime:
     return datetime(2026, 10, 7, 11, 0, tzinfo=EASTERN)
 
 
+def test_monitor_blocks_rejected_entry_and_moves_on() -> None:
+    from god_help_tradebot.screen import MarketSnapshot
+
+    class _RejectedEntryBroker(PaperBroker):
+        def submit_order(self, symbol, side, quantity, order_type, **kwargs):
+            if side.value == "BUY":
+                raise RuntimeError("HTTP Status: 417, Code: OPENAPI_ORDER_QUANTITY_EXCEED_LIMIT")
+            return super().submit_order(symbol, side, quantity, order_type, **kwargs)
+
+    broker = _RejectedEntryBroker(10_000)
+    snapshot = MarketSnapshot("GOW", 3.0, 5.0, 500_000, 100_000, 2.99, 3.01, 2.80, 3.20)
+    loop = MonitorLoop(
+        broker,
+        snapshot_provider=lambda: [snapshot],
+        now_provider=_open_session_now,
+        allow_entries=True,
+        flatten_before_close=False,
+        error_backoff_seconds=0,
+    )
+
+    summary = loop.run_once()
+    assert any(e.kind == "entry_blocked" and e.symbol == "GOW" for e in summary.events)
+    assert summary.entries == []
+
+    # Next poll skips the rejected candidate instead of retrying it.
+    summary2 = loop.run_once()
+    assert summary2.entries == []
+    assert not any(e.kind == "error" for e in summary2.events)
+
+
 # --- Config file -------------------------------------------------------------
 
 def test_load_bot_config_defaults_when_no_file(tmp_path, monkeypatch) -> None:

@@ -5,18 +5,25 @@ from god_help_tradebot import BotConfig, build_trade_plan
 
 def test_pct_mode_deploys_fraction_of_account() -> None:
     config = BotConfig(position_pct_of_account=1.0)
-    plan = build_trade_plan(2.0, 1.8, config, account_value=1_000_000)
+    plan = build_trade_plan(2.0, 1.8, config, account_value=100_000)
 
-    # Full account at $2.00 entry = 500,000 shares; stop distance $0.20 each.
-    assert plan.quantity == 500_000
-    assert plan.risk_usd == Decimal("100000.00")
+    # Full account at $2.00 with the 2% market-order headroom = 49,000 shares.
+    assert plan.quantity == 49_000
+    assert plan.risk_usd == Decimal("9800.00")
 
 
 def test_pct_mode_half_account() -> None:
     config = BotConfig(position_pct_of_account=0.5)
-    plan = build_trade_plan(2.0, 1.8, config, account_value=1_000_000)
+    plan = build_trade_plan(2.0, 1.8, config, account_value=100_000)
 
-    assert plan.quantity == 250_000
+    assert plan.quantity == 24_500
+
+
+def test_pct_mode_caps_order_quantity_below_platform_limit() -> None:
+    config = BotConfig(position_pct_of_account=1.0)
+    plan = build_trade_plan(1.0, 0.9, config, account_value=1_000_000)
+
+    assert plan.quantity == 199_999
 
 
 def test_fixed_mode_ignores_account_value() -> None:
