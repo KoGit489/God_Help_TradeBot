@@ -275,7 +275,7 @@ class MonitorLoop:
             if self._is_deterministic_rejection(exc):
                 self._exit_blocked[symbol] = session
                 summary.events.append(
-                    LoopEvent("exit_blocked", symbol, f"{session} rejected exit; will retry next session")
+                    LoopEvent("exit_blocked", symbol, f"{session} rejected exit ({_error_summary(exc)}); will retry next session")
                 )
             else:
                 raise
@@ -552,7 +552,7 @@ class MonitorLoop:
             if self._is_deterministic_rejection(exc):
                 self._entry_blocked.add(snapshot.symbol)
                 summary.events.append(
-                    LoopEvent("entry_blocked", snapshot.symbol, "short entry rejected by platform; skipped for today")
+                    LoopEvent("entry_blocked", snapshot.symbol, f"short entry rejected: {_error_summary(exc)}")
                 )
                 return
             raise
@@ -649,6 +649,15 @@ def _default_now() -> "datetime":
     from .schedule import EASTERN
 
     return datetime.now(EASTERN)
+
+
+def _error_summary(exc: Exception) -> str:
+    """Compact one-line description of a platform rejection for log events."""
+    text = str(exc)
+    for marker in ("Code: ", "Msg: "):
+        if marker in text:
+            text = text.split(marker, 1)[1]
+    return text.split(", RequestID")[0].strip()[:120]
 
 
 def build_exit_plan(plan: TradePlan, symbol: str) -> ExitPlan:
