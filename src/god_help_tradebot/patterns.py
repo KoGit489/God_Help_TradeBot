@@ -149,6 +149,98 @@ def detect_pattern(bars: list[Bar], symbol: str) -> PatternReport:
     return PatternReport(symbol.upper(), best, best_name, f"{best_name} score {best}", has_data=True)
 
 
+# --- Bear-side patterns ------------------------------------------------------
+# Mirrors of the bullish detectors, for short setups and bearish confirmation.
+
+def bear_flag_score(bars: list[Bar]) -> float:
+    """Drop then tight consolidation on shrinking volume: the flag before continuation down."""
+    if len(bars) < 8:
+        return 0.0
+    recent = bars[-8:]
+    drop = recent[:4]
+    flag = recent[-4:]
+
+    drop_move = (drop[0].open - drop[-1].close) / drop[0].open if drop[0].open else 0.0
+    if drop_move < 0.02:
+        return 0.0
+
+    flag_range = max(b.high for b in flag) - min(b.low for b in flag)
+    flag_mid = _avg([b.close for b in flag])
+    tightness = 1 - min(flag_range / flag_mid / 0.03, 1.0) if flag_mid else 0.0
+
+    drop_vol = _avg(b.volume for b in drop)
+    flag_vol = _avg(b.volume for b in flag)
+    volume_fade = min(drop_vol / flag_vol, 2.0) / 2.0 if flag_vol > 0 else 0.5
+
+    holds_loss = 1.0 if flag[-1].close <= drop[0].open - (drop_move * drop[0].open * 0.6) else 0.3
+    return round(min(drop_move / 0.10, 1.0) * 0.4 + tightness * 0.3 + volume_fade * 0.3 * holds_loss, 4)
+
+
+def lower_highs_score(bars: list[Bar]) -> float:
+    """Descending top: each bounce high is lower than the last (stair-step down)."""
+    if len(bars) < 6:
+        return 0.0
+    recent = bars[-6:]
+    highs = [b.high for b in recent]
+    falling = sum(1 for i in range(1, len(highs)) if highs[i] <= highs[i - 1])
+    stair = falling / (len(highs) - 1)
+
+    drift = (recent[0].open - recent[-1].close) / recent[0].open if recent[0].open else 0.0
+    drift_score = min(max(drift / 0.03, 0.0), 1.0)
+    return round(stair * 0.6 + drift_score * 0.4, 4)
+
+
+def breakdown_score(bars: list[Bar]) -> float:
+    """Price breaking below the session's prior low on expanding volume."""
+    if len(bars) < 5:
+        return 0.0
+    prior = bars[:-1]
+    last = bars[-1]
+    prior_low = min(b.low for b in prior)
+    if prior_low <= 0 or last.close > prior_low:
+        return 0.0
+
+    prior_vol = _avg(b.volume for b in prior)
+    vol_expansion = min(last.volume / prior_vol, 3.0) / 3.0 if prior_vol > 0 else 0.5
+    break_strength = min((prior_low - last.close) / prior_low / 0.02, 1.0)
+    return round(break_strength * 0.6 + vol_expansion * 0.4, 4)
+
+
+def detect_bear_pattern(bars: list[Bar], symbol: str) -> PatternReport:
+    """Score all bearish patterns and report the strongest one found."""
+    if not bars:
+        return PatternReport(symbol.upper(), 0.5, None, "no bar data", has_data=False)
+
+    scores = {
+        "bear_flag": bear_flag_score(bars),
+        "lower_highs": lower_highs_score(bars),
+        "breakdown": breakdown_score(bars),
+    }
+    best_name = max(scores, key=scores.get)
+    best = scores[best_name]
+    if best <= 0.0:
+        return PatternReport(symbol.upper(), 0.5, None, "no bearish pattern detected", has_data=True)
+    return PatternReport(symbol.upper(), best, best_name, f"{best_name} score {best}", has_data=True)
+
+
+def bear_pattern_score_for_symbol(
+    broker: WebullSandboxBroker,
+    symbol: str,
+    *,
+    timespan: str = "M5",
+    bar_count: int = 30,
+) -> PatternReport:
+    """Fetch recent bars and run bearish pattern detection (5m default)."""
+    try:
+        response = broker.session.data_client.market_data.get_history_bar(
+            symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count)
+        )
+        bars = bars_from_response(response.json())
+    except Exception:
+        bars = []
+    return detect_bear_pattern(bars, symbol)
+
+
 def pattern_score_for_symbol(
     broker: WebullSandboxBroker,
     symbol: str,
@@ -171,9 +263,14 @@ __all__ = [
     "Bar",
     "PatternReport",
     "bars_from_response",
+    "bear_flag_score",
+    "bear_pattern_score_for_symbol",
+    "breakdown_score",
     "breakout_score",
     "bull_flag_score",
+    "detect_bear_pattern",
     "detect_pattern",
     "higher_lows_score",
+    "lower_highs_score",
     "pattern_score_for_symbol",
 ]

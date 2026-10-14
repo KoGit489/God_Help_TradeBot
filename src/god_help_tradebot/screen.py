@@ -174,3 +174,42 @@ def _fade_score(snapshot: MarketSnapshot) -> float:
     slide = 1.0 - snapshot.range_position
     volume = min(snapshot.relative_volume / 10, 1.0)
     return round((pop * 0.4) + (slide * 0.4) + (volume * 0.2), 4)
+
+
+# --- Loser (bearish momentum) profile ----------------------------------------
+# Mirror of momentum: stocks already sliding hard on heavy volume, hugging the
+# day's low. With the grain this is a short; flipped, it's a contrarian bounce.
+
+LOSER_MAX_RANGE_POSITION = 0.4
+
+
+def screen_loser_candidates(
+    snapshots: list[MarketSnapshot],
+    config: BotConfig,
+) -> list[RankedCandidate]:
+    """Rank stocks sliding hard on volume near the day's low (bearish setups)."""
+    candidates = [s for s in snapshots if _passes_loser_filters(s, config)]
+    ranked = [RankedCandidate(snapshot, _loser_score(snapshot)) for snapshot in candidates]
+    return sorted(ranked, key=lambda candidate: candidate.score, reverse=True)
+
+
+def _passes_loser_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
+    return (
+        bool(snapshot.symbol.strip())
+        and 0 < snapshot.price <= config.max_symbol_price
+        and snapshot.change_percent <= -config.min_change_percent
+        and -config.max_change_percent <= snapshot.change_percent
+        and snapshot.volume >= config.min_average_volume
+        and snapshot.relative_volume >= config.min_relative_volume
+        and 0 < snapshot.bid <= snapshot.ask
+        and snapshot.spread_percent <= config.max_spread_percent
+        and 0 <= snapshot.range_position <= LOSER_MAX_RANGE_POSITION
+    )
+
+
+def _loser_score(snapshot: MarketSnapshot) -> float:
+    """Score the slide: downward momentum + relative volume + pinned near the low."""
+    momentum = min(abs(snapshot.change_percent) / 20, 1.0)
+    volume = min(snapshot.relative_volume / 10, 1.0)
+    pinned_low = 1.0 - snapshot.range_position
+    return round((momentum * 0.35) + (volume * 0.35) + (pinned_low * 0.30), 4)

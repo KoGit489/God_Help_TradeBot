@@ -17,6 +17,7 @@ from .screen import MarketSnapshot
 GAINER_RANK_TYPE = "DAY_1"
 GAINER_SORT = "CHANGE_RATIO"
 DESCENDING = "DESC"
+ASCENDING = "ASC"
 MOST_ACTIVE_RANK_TYPE = "RELATIVE_VOLUME_10D"
 
 
@@ -91,6 +92,21 @@ def fetch_most_active(broker: WebullSandboxBroker, limit: int = 50) -> list[dict
     return [row for row in rows[:limit] if isinstance(row, dict)]
 
 
+def fetch_top_losers(broker: WebullSandboxBroker, limit: int = 50) -> list[dict[str, Any]]:
+    """Fetch the top losers list from the broker's data client (bearish hunting)."""
+    response = broker.session.data_client.screener.list_gainers_losers(
+        rank_type=GAINER_RANK_TYPE,
+        category=US_STOCK_CATEGORY,
+        sort_by=GAINER_SORT,
+        direction=ASCENDING,
+    )
+    payload = response.json()
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows[:limit] if isinstance(row, dict)]
+
+
 def enrich_with_quotes(
     broker: WebullSandboxBroker,
     snapshots: Iterable[MarketSnapshot],
@@ -140,11 +156,14 @@ def auto_screen_snapshots(
     """Fetch candidates, convert to snapshots, pre-filter, enrich with quotes.
 
     source='gainers' hunts momentum (already moving); source='most_active' hunts
-    pre-pop accumulation (unusual relative volume before the move).
+    pre-pop accumulation (unusual relative volume before the move); source='losers'
+    hunts bearish momentum (already sliding).
     """
     config = config or BotConfig()
     if source == "most_active":
         rows = fetch_most_active(broker, limit=limit)
+    elif source == "losers":
+        rows = fetch_top_losers(broker, limit=limit)
     else:
         rows = fetch_top_gainers(broker, limit=limit)
     snapshots = []
@@ -154,9 +173,13 @@ def auto_screen_snapshots(
             continue
         if snapshot.price > config.max_symbol_price:
             continue
-        # Pre-pop discovery keeps quiet movers; momentum discovery needs the move.
+        # Pre-pop discovery keeps quiet movers; momentum needs the move up;
+        # losers need the move down.
         if source == "most_active":
             if not (PREPOP_MIN_CHANGE <= snapshot.change_percent <= PREPOP_MAX_CHANGE):
+                continue
+        elif source == "losers":
+            if snapshot.change_percent > -config.min_change_percent:
                 continue
         elif snapshot.change_percent < config.min_change_percent:
             continue
@@ -169,5 +192,6 @@ __all__ = [
     "enrich_with_quotes",
     "fetch_most_active",
     "fetch_top_gainers",
+    "fetch_top_losers",
     "screener_row_to_snapshot",
 ]

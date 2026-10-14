@@ -4,14 +4,14 @@ from .broker import BrokerAdapter, OrderPreview, WebullSandboxBroker, WebullSdkS
 from .autoscreen import auto_screen_snapshots
 from .botconfig import load_bot_config
 from .config import BotConfig
-from .confirm import ConfirmationReport, confirm_candidate
+from .confirm import ConfirmationReport, confirm_candidate, confirm_candidate_bearish
 from .monitor import ExitPlan, LoopEvent, LoopSummary, MonitorLoop, build_exit_plan
 from .news import NewsReport, fetch_news_sentiment
 from .paper import OrderSide, OrderStatus, OrderType, PaperBroker, PaperOrder, Position, Quote
 from .patterns import PatternReport, detect_pattern, pattern_score_for_symbol
 from .risk import TradePlan, build_trade_plan
 from .runner import run_bot
-from .screen import MarketSnapshot, RankedCandidate, screen_candidates
+from .screen import MarketSnapshot, RankedCandidate, screen_candidates, screen_fade_candidates, screen_loser_candidates, screen_prepop_candidates
 from .settings import load_webull_config
 from .state import StateStore
 from .worldnews import MarketNewsReport, fetch_market_news
@@ -46,6 +46,7 @@ __all__ = [
 	"build_exit_plan",
 	"build_trade_plan",
 	"confirm_candidate",
+	"confirm_candidate_bearish",
 	"detect_pattern",
 	"fetch_market_news",
 	"fetch_news_sentiment",
@@ -53,4 +54,7 @@ __all__ = [
 	"pattern_score_for_symbol",
 	"run_bot",
 	"screen_candidates",
+	"screen_fade_candidates",
+	"screen_loser_candidates",
+	"screen_prepop_candidates",
 ]

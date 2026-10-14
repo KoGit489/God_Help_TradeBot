@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from .broker import WebullSandboxBroker, US_STOCK_CATEGORY
 from .news import NewsReport, fetch_news_sentiment
-from .patterns import PatternReport, pattern_score_for_symbol
+from .patterns import PatternReport, bear_pattern_score_for_symbol, pattern_score_for_symbol
 from .worldnews import MarketNewsReport, fetch_market_news, market_adjustment
 
 
@@ -205,9 +205,112 @@ def confirm_candidate(
     )
 
 
+def _bear_flow_score(broker: WebullSandboxBroker, symbol: str) -> tuple[float, float | None, float]:
+    """Mirror of capital_flow_score: large OUTflow share scores bearishness."""
+    flow_score, large_ratio, net_flow = capital_flow_score(broker, symbol)
+    if large_ratio is None:
+        return flow_score, None, net_flow
+    return round(1.0 - large_ratio, 4), large_ratio, net_flow
+
+
+def _bear_rating_score(broker: WebullSandboxBroker, symbol: str) -> tuple[float, float | None]:
+    """Mirror of analyst_rating_score: sell/underperform share scores bearishness."""
+    rating_score, buy_ratio = analyst_rating_score(broker, symbol)
+    if buy_ratio is None:
+        return rating_score, None
+    return round(1.0 - buy_ratio, 4), buy_ratio
+
+
+def confirm_candidate_bearish(
+    broker: WebullSandboxBroker,
+    symbol: str,
+    *,
+    min_score: float = 0.5,
+    include_news: bool = True,
+    news_provider: Callable[[str], NewsReport] | None = None,
+    market_news: MarketNewsReport | None = None,
+    pattern_provider: Callable[[str], PatternReport] | None = None,
+    include_patterns: bool = True,
+) -> ConfirmationReport:
+    """Bearish mirror of confirm_candidate: every signal read in reverse.
+
+    Capital outflow, sell-side analyst share, bearish news, and bearish chart
+    patterns all push the score up. A hostile macro backdrop lowers the bar for
+    shorts instead of raising it.
+    """
+    flow_score, large_ratio, net_flow = _bear_flow_score(broker, symbol)
+    rating_score, buy_ratio = _bear_rating_score(broker, symbol)
+
+    news_score: float | None = None
+    news_articles = 0
+    if include_news:
+        provider = news_provider or fetch_news_sentiment
+        try:
+            report = provider(symbol)
+            # Bearish news is the inverse of the bullish sentiment score.
+            news_score = round(1.0 - report.score, 4)
+            news_articles = report.article_count
+        except Exception:
+            news_score = None
+
+    market_score: float | None = None
+    market_articles = 0
+    threshold = min_score
+    if include_news:
+        market = market_news
+        if market is None:
+            try:
+                market = fetch_market_news()
+            except Exception:
+                market = None
+        if market is not None:
+            market_score = market.score
+            market_articles = market.article_count
+            # A hostile backdrop (score < 0.5) helps shorts: lower the bar.
+            threshold = round(min_score + market_adjustment(market), 4)
+
+    pattern_score: float | None = None
+    pattern_name: str | None = None
+    if include_patterns:
+        provider = pattern_provider or (lambda s: bear_pattern_score_for_symbol(broker, s))
+        try:
+            pattern = provider(symbol)
+            if pattern.has_data and pattern.pattern is not None:
+                pattern_score = pattern.score
+                pattern_name = pattern.pattern
+        except Exception:
+            pattern_score = None
+
+    weighted = [
+        (flow_score, 0.45),
+        (rating_score, 0.20),
+        (news_score, 0.20),
+        (pattern_score, 0.15),
+    ]
+    present = [(value, weight) for value, weight in weighted if value is not None]
+    total_weight = sum(weight for _, weight in present)
+    score = round(sum(value * weight for value, weight in present) / total_weight, 4) if present else 0.5
+
+    return ConfirmationReport(
+        symbol=symbol.upper(),
+        score=score,
+        net_capital_flow=round(net_flow, 2),
+        large_flow_ratio=large_ratio,
+        analyst_buy_ratio=buy_ratio,
+        news_score=news_score,
+        news_article_count=news_articles,
+        market_score=market_score,
+        market_article_count=market_articles,
+        pattern_score=pattern_score,
+        pattern_name=pattern_name,
+        passed=score >= threshold,
+    )
+
+
 __all__ = [
     "ConfirmationReport",
     "analyst_rating_score",
     "capital_flow_score",
     "confirm_candidate",
+    "confirm_candidate_bearish",
 ]

@@ -15,7 +15,7 @@ from typing import Callable
 
 from .broker import BrokerAdapter, WebullSandboxBroker
 from .config import BotConfig
-from .confirm import confirm_candidate
+from .confirm import confirm_candidate, confirm_candidate_bearish
 from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
 from .risk import TradePlan, build_short_plan, build_trade_plan
 from .schedule import TradingSession, get_trading_session
@@ -26,6 +26,7 @@ from .screen import (
     best_candidate,
     screen_candidates,
     screen_fade_candidates,
+    screen_loser_candidates,
     screen_prepop_candidates,
 )
 
@@ -407,7 +408,7 @@ class MonitorLoop:
         self._enter(chosen, summary)
 
     def _gather_snapshots(self) -> list[MarketSnapshot]:
-        """Combine momentum (top gainers) and pre-pop (most active) discovery."""
+        """Combine momentum (gainers), pre-pop (most active), and loser discovery."""
         if self.snapshot_provider is not None:
             return self.snapshot_provider()
         if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
@@ -416,9 +417,15 @@ class MonitorLoop:
 
         snapshots = auto_screen_snapshots(self.broker, self.config, source="gainers")
         prepop = auto_screen_snapshots(self.broker, self.config, source="most_active")
+        # Losers join the hunt when the matrix needs the bearish side.
+        losers = (
+            auto_screen_snapshots(self.broker, self.config, source="losers")
+            if self.allow_shorts or self.config.flip_entries
+            else []
+        )
         # Deduplicate by symbol, keeping the first occurrence.
         seen: dict[str, MarketSnapshot] = {}
-        for snapshot in snapshots + prepop:
+        for snapshot in snapshots + prepop + losers:
             seen.setdefault(snapshot.symbol, snapshot)
         return list(seen.values())
 
@@ -432,14 +439,20 @@ class MonitorLoop:
         Returns (profiled_candidate, is_fallback) or None when nothing qualifies.
         """
         for profiled in self._ranked_profiles(snapshots):
-            if self._passes_confirmation(profiled.candidate.snapshot.symbol, summary):
+            symbol = profiled.candidate.snapshot.symbol
+            if self._passes_confirmation(symbol, summary, direction=self._profile_side(profiled.profile)):
                 return profiled, False
 
         # Forced fallback: relax gates progressively and take the best-odds survivor.
         return self._best_odds_fallback(snapshots, summary)
 
+    @staticmethod
+    def _profile_side(profile: str) -> str:
+        """Bearish profiles (fade/loser) confirm against the mirrored bear stack."""
+        return "bearish" if profile in ("fade", "loser") else "bullish"
+
     def _ranked_profiles(self, snapshots: list[MarketSnapshot]) -> list[ProfiledCandidate]:
-        """Rank momentum, pre-pop, and (when enabled) fade candidates together."""
+        """Rank momentum, pre-pop, and (when enabled) fade and loser candidates."""
         combined = [
             ProfiledCandidate(candidate, "momentum")
             for candidate in screen_candidates(snapshots, self.config)
@@ -451,6 +464,11 @@ class MonitorLoop:
             combined += [
                 ProfiledCandidate(candidate, "fade")
                 for candidate in screen_fade_candidates(snapshots, self.config)
+            ]
+        if self.allow_shorts or self.config.flip_entries:
+            combined += [
+                ProfiledCandidate(candidate, "loser")
+                for candidate in screen_loser_candidates(snapshots, self.config)
             ]
         combined.sort(key=lambda item: item.candidate.score, reverse=True)
         return combined
@@ -488,14 +506,17 @@ class MonitorLoop:
         summary: LoopSummary,
     ) -> None:
         profiled, is_fallback = chosen
-        wants_short = profiled.profile == "fade" or self.config.flip_entries
-        if wants_short and (self.allow_shorts or self.config.flip_entries):
+        # Direction matrix: bearish profiles (fade/loser) short with the grain;
+        # flip_entries inverts BOTH sides (bullish -> short, bearish -> buy).
+        bearish = profiled.profile in ("fade", "loser")
+        wants_short = bearish != self.config.flip_entries
+        if wants_short:
+            if not (self.allow_shorts or self.config.flip_entries):
+                return  # shorting not enabled
             if not self._market_open():
                 return  # Webull only accepts shorts during regular hours
             self._enter_short(profiled, summary)
             return
-        if profiled.profile == "fade":
-            return  # fade shorts require allow_shorts
         snapshot = profiled.candidate.snapshot
         # Fixed-percentage bracket: works at the open before a day's range exists.
         entry = Decimal(str(snapshot.price))
@@ -566,11 +587,13 @@ class MonitorLoop:
             raise
         summary.entries.append(order)
         self._pending_entry = snapshot.symbol
+        flipped = self.config.flip_entries
+        tag = "-flipped" if flipped and profiled.profile != "fade" else ""
         summary.events.append(
             LoopEvent(
                 "entry",
                 snapshot.symbol,
-                f"shorted {plan.quantity} [{profiled.profile}{'-flipped' if profiled.profile != 'fade' else ''}] (score {profiled.candidate.score})",
+                f"shorted {plan.quantity} [{profiled.profile}{tag}] (score {profiled.candidate.score})",
             )
         )
         self.exit_plans[snapshot.symbol] = ExitPlan(
@@ -593,10 +616,10 @@ class MonitorLoop:
                 return candidate
         return None
 
-    def _passes_confirmation(self, symbol: str, summary: LoopSummary) -> bool:
+    def _passes_confirmation(self, symbol: str, summary: LoopSummary, direction: str = "bullish") -> bool:
         if self.confirmation is None:
             return True
-        report = self._confirm(symbol)
+        report = self._confirm(symbol, direction)
         score = getattr(report, "score", None)
         passed = getattr(report, "passed", None)
         if passed is None and score is not None:
@@ -607,21 +630,21 @@ class MonitorLoop:
             LoopEvent(
                 "confirmation",
                 symbol,
-                f"score {score if score is not None else 'n/a'} -> {'pass' if passed else 'reject'}",
+                f"{direction} score {score if score is not None else 'n/a'} -> {'pass' if passed else 'reject'}",
             )
         )
         return bool(passed)
 
-    def _confirm(self, symbol: str) -> Any:
+    def _confirm(self, symbol: str, direction: str = "bullish") -> Any:
         """Run confirmation, supplying the shared market backdrop when available."""
-        if self.confirmation is confirm_candidate or self.confirmation is None:
-            if isinstance(self.broker, WebullSandboxBroker):
-                return confirm_candidate(
-                    self.broker,
-                    symbol,
-                    min_score=self.min_confirmation_score,
-                    market_news=self._market_news_report(),
-                )
+        if (self.confirmation in (confirm_candidate, None)) and isinstance(self.broker, WebullSandboxBroker):
+            confirm = confirm_candidate if direction == "bullish" else confirm_candidate_bearish
+            return confirm(
+                self.broker,
+                symbol,
+                min_score=self.min_confirmation_score,
+                market_news=self._market_news_report(),
+            )
         return self.confirmation(symbol)
 
     def _market_news_report(self) -> Any | None:
