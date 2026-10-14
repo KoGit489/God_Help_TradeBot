@@ -114,6 +114,9 @@ class MonitorLoop:
         # loop moves to the next candidate instead of retrying the same one.
         self._entry_blocked: set[str] = set()
         self._entry_blocked_date: Any | None = None
+        # Symbol with an entry order in flight (submitted but not yet visible as
+        # a position); prevents double-entering during the settlement gap.
+        self._pending_entry: str | None = None
 
         # Restore persisted exit plans so a restart never strands a position.
         if self.state_store is not None and not self.exit_plans:
@@ -141,6 +144,10 @@ class MonitorLoop:
 
         self._sync_orders()
         positions = self.broker.get_positions()
+        if self._pending_entry is not None:
+            pending = positions.get(self._pending_entry)
+            if pending is not None and pending.quantity != 0:
+                self._pending_entry = None  # fill is now visible; managed normally
         for symbol, position in positions.items():
             if position.quantity != 0:
                 summary.positions_seen[symbol] = position
@@ -149,7 +156,7 @@ class MonitorLoop:
         if self.flatten_before_close:
             self._maybe_flatten(positions, summary)
 
-        if self.allow_entries and not self._has_open_position(positions):
+        if self.allow_entries and not self._has_open_position(positions) and self._pending_entry is None:
             self._maybe_enter(summary)
 
         self._persist_plans()
@@ -514,6 +521,7 @@ class MonitorLoop:
                 return
             raise
         summary.entries.append(order)
+        self._pending_entry = snapshot.symbol
         summary.events.append(
             LoopEvent(
                 "entry",
@@ -557,6 +565,7 @@ class MonitorLoop:
                 return
             raise
         summary.entries.append(order)
+        self._pending_entry = snapshot.symbol
         summary.events.append(
             LoopEvent(
                 "entry",

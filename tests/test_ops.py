@@ -204,6 +204,36 @@ def test_monitor_blocks_rejected_entry_and_moves_on() -> None:
     assert not any(e.kind == "error" for e in summary2.events)
 
 
+def test_pending_entry_guard_prevents_double_entry_during_settlement() -> None:
+    from god_help_tradebot.screen import MarketSnapshot
+
+    # Broker whose positions don't show the fill until process_quote runs
+    # (mimics the settlement gap between entry order and visible position).
+    broker = PaperBroker(10_000)
+    snapshot = MarketSnapshot("GOW", 3.0, 5.0, 500_000, 100_000, 2.99, 3.01, 2.80, 3.20)
+    loop = MonitorLoop(
+        broker,
+        snapshot_provider=lambda: [snapshot],
+        now_provider=_open_session_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    loop.run_once()
+    assert loop._pending_entry == "GOW"
+
+    # Position still not visible (no quote processed yet): no second entry.
+    summary2 = loop.run_once()
+    assert summary2.entries == []
+
+    # Fill arrives -> position visible -> guard clears and manages normally.
+    from god_help_tradebot import Quote
+    from decimal import Decimal as D
+    broker.process_quote(Quote("GOW", D("2.99"), D("3.01"), D("3.0")))
+    loop.run_once()
+    assert loop._pending_entry is None
+
+
 # --- Config file -------------------------------------------------------------
 
 def test_load_bot_config_defaults_when_no_file(tmp_path, monkeypatch) -> None:
