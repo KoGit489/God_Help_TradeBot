@@ -28,12 +28,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-file", default="bot_config.json", help="Path to bot_config.json overrides")
     parser.add_argument("--state-file", default="bot_state.json", help="Path to persisted exit plans")
     parser.add_argument("--log-file", default="bot.log", help="Path to the rotating log file")
+    parser.add_argument("--backtest", metavar="TIMELINE.json", help="Replay a JSON timeline instead of live trading")
+    parser.add_argument("--backtest-cash", type=float, default=100_000, help="Starting cash for backtests")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_bot_config(args.config_file)
+    if args.backtest:
+        from .backtest import load_timeline, run_backtest
+
+        result = run_backtest(
+            load_timeline(args.backtest),
+            config,
+            starting_cash=args.backtest_cash,
+            allow_shorts=config.allow_shorts,
+        )
+        print("=== BACKTEST RESULTS ===")
+        print(f"trades: {result.total_trades}  wins: {result.wins}  losses: {result.losses}")
+        print(f"win rate: {result.win_rate:.1%}")
+        print(f"realized P&L: ${result.realized_pnl:,.2f}")
+        for trade in result.trades:
+            print(f"  {trade.symbol} {trade.side} x{trade.quantity}: {trade.entry_price} -> {trade.exit_price} = ${trade.pnl:,.2f}")
+        return 0
     run_bot(
         config=config,
         poll_seconds=args.poll_seconds,

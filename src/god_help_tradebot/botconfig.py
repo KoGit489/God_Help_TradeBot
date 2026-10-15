@@ -33,6 +33,8 @@ _TUNABLES = {
     "min_signals_present": int,
     "require_trend_alignment": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "allow_fallback": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
+    "entry_cooldown_minutes": int,
+    "require_double_confirmation": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
 }
 
 

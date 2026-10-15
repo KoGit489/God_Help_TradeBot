@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from god_help_tradebot import MonitorLoop, PaperBroker, WebullSandboxBroker, WebullSdkSession
+from god_help_tradebot import BotConfig, MonitorLoop, PaperBroker, WebullSandboxBroker, WebullSdkSession
 from god_help_tradebot.confirm import (
     analyst_rating_score,
     capital_flow_score,
@@ -154,6 +154,7 @@ def test_monitor_skips_unconfirmed_candidate_and_takes_next() -> None:
 
     loop = MonitorLoop(
         broker,
+        BotConfig(allow_fallback=False),
         snapshot_provider=lambda: [_snapshot("BAD"), _snapshot("GOOD")],
         confirmation=_confirmation,
         now_provider=_open_market_now,
@@ -161,7 +162,10 @@ def test_monitor_skips_unconfirmed_candidate_and_takes_next() -> None:
     )
 
     summary = loop.run_once()
+    assert summary.entries == []  # first pass only pends double confirmation
+    assert any(e.kind == "confirmation_pending" and e.symbol == "GOOD" for e in summary.events)
 
+    summary = loop.run_once(summary)
     assert summary.entries[0].symbol == "GOOD"
     assert any(e.kind == "confirmation" and e.symbol == "BAD" for e in summary.events)
 

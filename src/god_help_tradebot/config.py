@@ -28,6 +28,11 @@ class BotConfig:
     require_trend_alignment: bool = True
     # Forced best-odds entry when nothing passes (keeps trading every session).
     allow_fallback: bool = True
+    # No entries for this many minutes after the 9:30 open (widest spreads,
+    # fakest moves live there).
+    entry_cooldown_minutes: int = 15
+    # Candidates must pass confirmation on two consecutive polls before entry.
+    require_double_confirmation: bool = True
 
     def __post_init__(self) -> None:
         if self.max_symbol_price <= 0:
@@ -54,3 +59,5 @@ class BotConfig:
             raise ValueError("target_pct must be between 0 and 1")
         if self.min_signals_present < 0 or self.min_signals_present > 4:
             raise ValueError("min_signals_present must be between 0 and 4")
+        if self.entry_cooldown_minutes < 0:
+            raise ValueError("entry_cooldown_minutes cannot be negative")

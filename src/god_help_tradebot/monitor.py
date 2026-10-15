@@ -118,6 +118,10 @@ class MonitorLoop:
         # Symbol with an entry order in flight (submitted but not yet visible as
         # a position); prevents double-entering during the settlement gap.
         self._pending_entry: str | None = None
+        # Consecutive confirmation passes per symbol/direction for double
+        # confirmation; entries need two in a row when the config requires it.
+        self._confirm_streak: dict[tuple[str, str], int] = {}
+        self._confirm_streak_date: Any | None = None
 
         # Restore persisted exit plans so a restart never strands a position.
         if self.state_store is not None and not self.exit_plans:
@@ -394,12 +398,15 @@ class MonitorLoop:
             self.state_store.save(self.exit_plans)
 
     def _maybe_enter(self, summary: LoopSummary) -> None:
-        if not self._market_open():
+        if not self._market_open() or self._in_entry_cooldown():
             return
         today = self._now().date()
         if self._entry_blocked_date != today:
             self._entry_blocked.clear()
             self._entry_blocked_date = today
+        if self._confirm_streak_date != today:
+            self._confirm_streak.clear()
+            self._confirm_streak_date = today
         snapshots = [s for s in self._gather_snapshots() if s.symbol not in self._entry_blocked]
         if not snapshots:
             return
@@ -521,6 +528,8 @@ class MonitorLoop:
         snapshot = profiled.candidate.snapshot
         if not is_fallback and not self._entry_gates_pass(snapshot.symbol, "long", summary):
             return
+        if not self._spread_ok_at_entry(snapshot.symbol, summary):
+            return
         # Fixed-percentage bracket: works at the open before a day's range exists.
         entry = Decimal(str(snapshot.price))
         stop_price = entry * (Decimal("1") - Decimal(str(self.config.stop_pct)))
@@ -569,6 +578,8 @@ class MonitorLoop:
         snapshot = profiled.candidate.snapshot
         if not self._entry_gates_pass(snapshot.symbol, "short", summary):
             return
+        if not self._spread_ok_at_entry(snapshot.symbol, summary):
+            return
         # Fixed-percentage bracket: stop 10% above entry, target 30% below.
         entry = Decimal(str(snapshot.price))
         stop_price = entry * (Decimal("1") + Decimal(str(self.config.stop_pct)))
@@ -606,6 +617,19 @@ class MonitorLoop:
             stop_price=plan.stop_price,
             direction="short",
         )
+
+    def _spread_ok_at_entry(self, symbol: str, summary: LoopSummary) -> bool:
+        """Re-check the live spread right before entry; quotes may have widened."""
+        quote = self.broker.get_latest_quote(symbol)
+        if quote is None or quote.last <= 0:
+            return True  # no fresh quote — don't block on missing information
+        spread_pct = ((quote.ask - quote.bid) / quote.last) * 100
+        if spread_pct > self.config.max_spread_percent:
+            summary.events.append(
+                LoopEvent("spread_rejected", symbol, f"live spread {spread_pct:.2f}% too wide at entry")
+            )
+            return False
+        return True
 
     def _entry_gates_pass(self, symbol: str, direction: str, summary: LoopSummary) -> bool:
         """Accuracy gates for confirmed entries: tape alignment with the direction."""
@@ -654,6 +678,18 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("insufficient_signals", symbol, f"only {signals_present} signal group(s) with data")
             )
+        # Double confirmation: two consecutive passes before entry.
+        key = (symbol, direction)
+        if passed and self.config.require_double_confirmation:
+            streak = self._confirm_streak.get(key, 0) + 1
+            self._confirm_streak[key] = streak
+            if streak < 2:
+                summary.events.append(
+                    LoopEvent("confirmation_pending", symbol, f"{direction} pass 1/2; needs a second consecutive pass")
+                )
+                passed = False
+        elif not passed:
+            self._confirm_streak.pop(key, None)
         summary.events.append(
             LoopEvent(
                 "confirmation",
@@ -701,6 +737,20 @@ class MonitorLoop:
         now = self._now()
         session = get_trading_session(now.date())
         return session is not None and session.market_open <= now < session.exit_time
+
+    def _in_entry_cooldown(self) -> bool:
+        """True during the first entry_cooldown_minutes after the open."""
+        if self.config.entry_cooldown_minutes <= 0:
+            return False
+        now = self._now()
+        session = get_trading_session(now.date())
+        if session is None:
+            return False
+        from datetime import timedelta
+
+        return session.market_open <= now < session.market_open + timedelta(
+            minutes=self.config.entry_cooldown_minutes
+        )
 
 
 def _default_now() -> "datetime":
