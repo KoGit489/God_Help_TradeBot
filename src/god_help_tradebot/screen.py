@@ -66,11 +66,31 @@ def _passes_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
     )
 
 
+def explosive_score(snapshot: MarketSnapshot, direction: str = "long") -> float:
+    """Score raw explosive potential on TOP of the established filters.
+
+    The pricing/volume/spread requirements stay exactly the same; this only
+    changes WHO LEADS the ranking. Explosive moves are volume-led, so the
+    volume surge carries the most weight, then price velocity, then pressure
+    toward the day's extreme (high for longs, low for shorts), then liquidity
+    (a tight spread means cleaner fills on a fast mover).
+    """
+    volume_surge = min(snapshot.relative_volume / 15, 1.0)
+    velocity = min(abs(snapshot.change_percent) / 30, 1.0)
+    if direction == "short":
+        pressure = 1.0 - snapshot.range_position
+    else:
+        pressure = snapshot.range_position
+    liquidity = 1.0 - min(snapshot.spread_percent / 5, 1.0)
+    return round(
+        (volume_surge * 0.40) + (velocity * 0.30) + (pressure * 0.20) + (liquidity * 0.10),
+        4,
+    )
+
+
 def _score(snapshot: MarketSnapshot) -> float:
-    momentum = min(snapshot.change_percent / 20, 1.0)
-    volume = min(snapshot.relative_volume / 10, 1.0)
-    range_position = snapshot.range_position
-    return round((momentum * 0.35) + (volume * 0.35) + (range_position * 0.30), 4)
+    """Momentum ranking = explosive upside potential."""
+    return explosive_score(snapshot, "long")
 
 
 # --- Pre-pop (accumulation) profile ---------------------------------------
@@ -169,11 +189,11 @@ def _passes_fade_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
 
 
 def _fade_score(snapshot: MarketSnapshot) -> float:
-    """Score the fade: bigger prior pop + deeper slide off the high = better short."""
+    """Score the fade: big prior pop + deep slide, ranked by explosive downside."""
     pop = min(snapshot.change_percent / 50, 1.0)
     slide = 1.0 - snapshot.range_position
-    volume = min(snapshot.relative_volume / 10, 1.0)
-    return round((pop * 0.4) + (slide * 0.4) + (volume * 0.2), 4)
+    fade_signature = (pop * 0.5) + (slide * 0.5)
+    return round((fade_signature * 0.5) + (explosive_score(snapshot, "short") * 0.5), 4)
 
 
 # --- Loser (bearish momentum) profile ----------------------------------------
@@ -208,8 +228,5 @@ def _passes_loser_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
 
 
 def _loser_score(snapshot: MarketSnapshot) -> float:
-    """Score the slide: downward momentum + relative volume + pinned near the low."""
-    momentum = min(abs(snapshot.change_percent) / 20, 1.0)
-    volume = min(snapshot.relative_volume / 10, 1.0)
-    pinned_low = 1.0 - snapshot.range_position
-    return round((momentum * 0.35) + (volume * 0.35) + (pinned_low * 0.30), 4)
+    """Loser ranking = explosive downside potential."""
+    return explosive_score(snapshot, "short")

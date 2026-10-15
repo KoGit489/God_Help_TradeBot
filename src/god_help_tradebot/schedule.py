@@ -14,7 +14,7 @@ class TradingSession:
 
     @property
     def exit_time(self) -> datetime:
-        return self.market_close - timedelta(minutes=3)
+        return self.market_close - timedelta(minutes=1)
 
 
 def _observed(day: date) -> date:

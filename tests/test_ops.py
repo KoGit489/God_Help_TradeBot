@@ -100,8 +100,8 @@ def test_monitor_halts_after_max_consecutive_errors() -> None:
 # --- End-of-day flatten ------------------------------------------------------
 
 def _near_close_now() -> datetime:
-    # 3:58 PM ET is past the 3-minute-before-close exit cutoff.
-    return datetime(2026, 10, 7, 15, 58, tzinfo=EASTERN)
+    # 3:59:30 PM ET is past the 1-minute-before-close exit cutoff.
+    return datetime(2026, 10, 7, 15, 59, 30, tzinfo=EASTERN)
 
 
 def test_monitor_flattens_positions_before_close() -> None:

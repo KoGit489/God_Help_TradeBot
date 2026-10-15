@@ -187,7 +187,7 @@ def test_monitor_flatten_covers_short_position() -> None:
     loop = MonitorLoop(
         broker,
         exit_plans={"BDAI": plan},
-        now_provider=lambda: datetime(2026, 10, 7, 15, 58, tzinfo=EASTERN),
+        now_provider=lambda: datetime(2026, 10, 7, 15, 59, 30, tzinfo=EASTERN),
         flatten_before_close=True,
     )
 
