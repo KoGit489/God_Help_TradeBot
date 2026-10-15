@@ -260,18 +260,19 @@ class MonitorLoop:
                 )
                 self._exit_blocked.pop(symbol, None)
             elif quote.bid <= plan.stop_price:
-                # Webull's night session only accepts LIMIT orders; convert the stop
-                # into a limit sell at the stop price outside regular hours.
+                # The stop has already been breached — exit immediately with a
+                # market order (a resting stop below the market is invalid).
+                # Night session accepts LIMIT only, so use an aggressive limit
+                # at the current bid outside regular hours.
                 if self._market_open():
                     order = self.broker.submit_order(
-                        symbol, OrderSide.SELL, position.quantity, OrderType.STOP,
-                        stop_price=float(plan.stop_price),
+                        symbol, OrderSide.SELL, position.quantity, OrderType.MARKET,
                         trading_session="CORE",
                     )
                 else:
                     order = self.broker.submit_order(
                         symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
-                        limit_price=float(plan.stop_price),
+                        limit_price=float(quote.bid),
                         trading_session="NIGHT",
                     )
                 summary.exits.append(order)
@@ -315,17 +316,18 @@ class MonitorLoop:
             )
             self._exit_blocked.pop(symbol, None)
         elif quote.ask >= plan.stop_price:
-            # Night session accepts LIMIT only; use a limit cover at the stop.
+            # The stop has already been breached — cover immediately with a
+            # market buy (a resting stop above the market is invalid). Night
+            # session accepts LIMIT only, so use an aggressive limit at the ask.
             if self._market_open():
                 order = self.broker.submit_order(
-                    symbol, OrderSide.BUY, quantity, OrderType.STOP,
-                    stop_price=float(plan.stop_price),
+                    symbol, OrderSide.BUY, quantity, OrderType.MARKET,
                     trading_session="CORE",
                 )
             else:
                 order = self.broker.submit_order(
                     symbol, OrderSide.BUY, quantity, OrderType.LIMIT,
-                    limit_price=float(plan.stop_price),
+                    limit_price=float(quote.ask),
                     trading_session="NIGHT",
                 )
             summary.exits.append(order)

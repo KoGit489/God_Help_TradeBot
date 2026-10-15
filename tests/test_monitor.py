@@ -73,7 +73,7 @@ def test_monitor_exits_at_stop_price() -> None:
 
     summary = loop.run_once()
 
-    assert summary.exits[0].order_type is OrderType.STOP
+    assert summary.exits[0].order_type is OrderType.MARKET  # breached stop exits immediately
     assert summary.exits[0].status is OrderStatus.OPEN
     assert summary.events[0].kind == "stop_loss_order"
 

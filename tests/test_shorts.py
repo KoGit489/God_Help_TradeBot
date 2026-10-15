@@ -176,6 +176,7 @@ def test_monitor_covers_short_at_stop() -> None:
     summary = loop.run_once()
 
     assert summary.exits[0].side is OrderSide.BUY
+    assert summary.exits[0].order_type is OrderType.MARKET  # breached stop covers immediately
     assert summary.events[0].kind == "stop_loss_order"
 
 
