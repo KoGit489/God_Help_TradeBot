@@ -241,6 +241,33 @@ def bear_pattern_score_for_symbol(
     return detect_bear_pattern(bars, symbol)
 
 
+def trend_direction(
+    broker: WebullSandboxBroker,
+    symbol: str,
+    *,
+    timespan: str = "M5",
+    bar_count: int = 10,
+) -> str | None:
+    """Recent tape direction from 5m bars: 'up', 'down', or None when unknown."""
+    try:
+        response = broker.session.data_client.market_data.get_history_bar(
+            symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count)
+        )
+        bars = bars_from_response(response.json())
+    except Exception:
+        return None
+    if len(bars) < 3:
+        return None
+    closes = [b.close for b in bars]
+    average = _avg(closes[:-1])
+    last = closes[-1]
+    if last > average:
+        return "up"
+    if last < average:
+        return "down"
+    return None
+
+
 def pattern_score_for_symbol(
     broker: WebullSandboxBroker,
     symbol: str,
@@ -273,4 +300,5 @@ __all__ = [
     "higher_lows_score",
     "lower_highs_score",
     "pattern_score_for_symbol",
+    "trend_direction",
 ]

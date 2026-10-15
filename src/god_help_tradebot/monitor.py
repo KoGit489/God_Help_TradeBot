@@ -419,10 +419,10 @@ class MonitorLoop:
 
         snapshots = auto_screen_snapshots(self.broker, self.config, source="gainers")
         prepop = auto_screen_snapshots(self.broker, self.config, source="most_active")
-        # Losers join the hunt when the matrix needs the bearish side.
+        # Losers join the hunt when shorting is enabled.
         losers = (
             auto_screen_snapshots(self.broker, self.config, source="losers")
-            if self.allow_shorts or self.config.flip_entries
+            if self.allow_shorts
             else []
         )
         # Deduplicate by symbol, keeping the first occurrence.
@@ -446,6 +446,8 @@ class MonitorLoop:
                 return profiled, False
 
         # Forced fallback: relax gates progressively and take the best-odds survivor.
+        if not self.config.allow_fallback:
+            return None
         return self._best_odds_fallback(snapshots, summary)
 
     @staticmethod
@@ -467,7 +469,6 @@ class MonitorLoop:
                 ProfiledCandidate(candidate, "fade")
                 for candidate in screen_fade_candidates(snapshots, self.config)
             ]
-        if self.allow_shorts or self.config.flip_entries:
             combined += [
                 ProfiledCandidate(candidate, "loser")
                 for candidate in screen_loser_candidates(snapshots, self.config)
@@ -508,18 +509,18 @@ class MonitorLoop:
         summary: LoopSummary,
     ) -> None:
         profiled, is_fallback = chosen
-        # Direction matrix: bearish profiles (fade/loser) short with the grain;
-        # flip_entries inverts BOTH sides (bullish -> short, bearish -> buy).
-        bearish = profiled.profile in ("fade", "loser")
-        wants_short = bearish != self.config.flip_entries
-        if wants_short:
-            if not (self.allow_shorts or self.config.flip_entries):
+        # With the grain only: bullish profiles buy, bearish profiles (fade/loser)
+        # short. No contrarian paths.
+        if profiled.profile in ("fade", "loser"):
+            if not self.allow_shorts:
                 return  # shorting not enabled
             if not self._market_open():
                 return  # Webull only accepts shorts during regular hours
             self._enter_short(profiled, summary)
             return
         snapshot = profiled.candidate.snapshot
+        if not is_fallback and not self._entry_gates_pass(snapshot.symbol, "long", summary):
+            return
         # Fixed-percentage bracket: works at the open before a day's range exists.
         entry = Decimal(str(snapshot.price))
         stop_price = entry * (Decimal("1") - Decimal(str(self.config.stop_pct)))
@@ -564,8 +565,10 @@ class MonitorLoop:
             )
 
     def _enter_short(self, profiled: ProfiledCandidate, summary: LoopSummary) -> None:
-        """Enter a short on a fade candidate: stop above, target below."""
+        """Enter a short on a fade/loser candidate: stop above, target below."""
         snapshot = profiled.candidate.snapshot
+        if not self._entry_gates_pass(snapshot.symbol, "short", summary):
+            return
         # Fixed-percentage bracket: stop 10% above entry, target 30% below.
         entry = Decimal(str(snapshot.price))
         stop_price = entry * (Decimal("1") + Decimal(str(self.config.stop_pct)))
@@ -589,13 +592,11 @@ class MonitorLoop:
             raise
         summary.entries.append(order)
         self._pending_entry = snapshot.symbol
-        flipped = self.config.flip_entries
-        tag = "-flipped" if flipped and profiled.profile != "fade" else ""
         summary.events.append(
             LoopEvent(
                 "entry",
                 snapshot.symbol,
-                f"shorted {plan.quantity} [{profiled.profile}{tag}] (score {profiled.candidate.score})",
+                f"shorted {plan.quantity} [{profiled.profile}] (score {profiled.candidate.score})",
             )
         )
         self.exit_plans[snapshot.symbol] = ExitPlan(
@@ -605,6 +606,24 @@ class MonitorLoop:
             stop_price=plan.stop_price,
             direction="short",
         )
+
+    def _entry_gates_pass(self, symbol: str, direction: str, summary: LoopSummary) -> bool:
+        """Accuracy gates for confirmed entries: tape alignment with the direction."""
+        if not self.config.require_trend_alignment:
+            return True
+        if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
+            return True
+        from .patterns import trend_direction
+
+        trend = trend_direction(self.broker, symbol)
+        if trend is None:
+            return True  # no bar data — don't block on missing information
+        aligned = (direction == "long" and trend == "up") or (direction == "short" and trend == "down")
+        if not aligned:
+            summary.events.append(
+                LoopEvent("trend_misaligned", symbol, f"{direction} entry skipped: tape is {trend}")
+            )
+        return aligned
 
     def _first_confirmed(
         self,
@@ -628,6 +647,13 @@ class MonitorLoop:
             passed = score >= self.min_confirmation_score
         if passed is None:
             return True
+        # Quorum: enough signal groups must have real data behind the score.
+        signals_present = getattr(report, "signals_present", None)
+        if passed and signals_present is not None and signals_present < self.config.min_signals_present:
+            passed = False
+            summary.events.append(
+                LoopEvent("insufficient_signals", symbol, f"only {signals_present} signal group(s) with data")
+            )
         summary.events.append(
             LoopEvent(
                 "confirmation",

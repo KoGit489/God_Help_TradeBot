@@ -197,30 +197,7 @@ def test_monitor_flatten_covers_short_position() -> None:
     assert any(e.kind == "eod_flatten" for e in summary.events)
 
 
-# --- Paradox mode: flip execution, not signals -----------------------------------
-
-def test_paradox_mode_shorts_a_momentum_pick() -> None:
-    broker = PaperBroker(10_000)
-    broker.last_quotes["GOW"] = Quote("GOW", Decimal("2.99"), Decimal("3.01"), Decimal("3.0"))
-    # A normal bullish momentum candidate (5% up, strong volume, near high).
-    snapshot = _fade_snapshot("GOW", 3.00, 5.0, 2.80, 3.20)
-    loop = MonitorLoop(
-        broker,
-        BotConfig(flip_entries=True),
-        snapshot_provider=lambda: [snapshot],
-        now_provider=_open_now,
-        allow_entries=True,
-        flatten_before_close=False,
-    )
-
-    summary = loop.run_once()
-
-    assert summary.entries[0].side is OrderSide.SHORT
-    assert "[momentum-flipped]" in summary.events[0].detail
-    plan = loop.exit_plans["GOW"]
-    assert plan.direction == "short"
-    assert plan.stop_price > plan.target_price
-
+# --- With-the-grain shorts: fade profile ----------------------------------------
 
 def test_paradox_off_buys_momentum_pick() -> None:
     broker = PaperBroker(10_000)
@@ -264,10 +241,11 @@ def test_fixed_pct_bracket_on_long_entry() -> None:
 def test_fixed_pct_bracket_on_short_entry() -> None:
     broker = PaperBroker(10_000)
     broker.last_quotes["GOW"] = Quote("GOW", Decimal("2.99"), Decimal("3.01"), Decimal("3.0"))
-    snapshot = _fade_snapshot("GOW", 3.00, 5.0, 2.80, 3.20)
+    # A fade-profile candidate: popped 45%, slid into the lower half of the range.
+    snapshot = _fade_snapshot("GOW", 3.00, 45.0, 2.80, 3.60)
     loop = MonitorLoop(
         broker,
-        BotConfig(flip_entries=True),
+        BotConfig(allow_shorts=True),
         snapshot_provider=lambda: [snapshot],
         now_provider=_open_now,
         allow_entries=True,

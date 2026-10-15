@@ -189,25 +189,6 @@ def test_matrix_negative_indicators_short_with_grain() -> None:
     assert loop.exit_plans["DOWN"].direction == "short"
 
 
-def test_matrix_negative_indicators_buy_against_grain() -> None:
-    broker = PaperBroker(10_000)
-    broker.last_quotes["DOWN"] = Quote("DOWN", Decimal("1.99"), Decimal("2.01"), Decimal("2.0"))
-    snapshot = _loser_snapshot("DOWN", 2.0, -25.0, 1.95, 3.00)
-    loop = MonitorLoop(
-        broker,
-        BotConfig(flip_entries=True),
-        snapshot_provider=lambda: [snapshot],
-        now_provider=_open_now,
-        allow_entries=True,
-        flatten_before_close=False,
-    )
-
-    summary = loop.run_once()
-
-    assert summary.entries[0].side is OrderSide.BUY
-    assert loop.exit_plans["DOWN"].direction == "long"
-
-
 def test_matrix_positive_indicators_buy_with_grain() -> None:
     broker = PaperBroker(10_000)
     broker.last_quotes["UP"] = Quote("UP", Decimal("2.99"), Decimal("3.01"), Decimal("3.0"))
@@ -226,25 +207,6 @@ def test_matrix_positive_indicators_buy_with_grain() -> None:
     assert summary.entries[0].side is OrderSide.BUY
 
 
-def test_matrix_positive_indicators_short_against_grain() -> None:
-    broker = PaperBroker(10_000)
-    broker.last_quotes["UP"] = Quote("UP", Decimal("2.99"), Decimal("3.01"), Decimal("3.0"))
-    snapshot = MarketSnapshot("UP", 3.0, 5.0, 500_000, 100_000, 2.99, 3.01, 2.80, 3.20)
-    loop = MonitorLoop(
-        broker,
-        BotConfig(flip_entries=True),
-        snapshot_provider=lambda: [snapshot],
-        now_provider=_open_now,
-        allow_entries=True,
-        flatten_before_close=False,
-    )
-
-    summary = loop.run_once()
-
-    assert summary.entries[0].side is OrderSide.SHORT
-    assert "[momentum-flipped]" in summary.events[0].detail
-
-
 def test_matrix_loser_skipped_without_shorts_enabled() -> None:
     broker = PaperBroker(10_000)
     snapshot = _loser_snapshot("DOWN", 2.0, -25.0, 1.95, 3.00)
@@ -261,3 +223,59 @@ def test_matrix_loser_skipped_without_shorts_enabled() -> None:
 
     # Loser isn't ranked without shorts, and it's not a bullish candidate either.
     assert all(order.symbol != "DOWN" for order in summary.entries)
+
+
+# --- Accuracy gates ---------------------------------------------------------------
+
+def test_quorum_rejects_candidate_with_too_few_signals() -> None:
+    from god_help_tradebot.confirm import ConfirmationReport
+
+    broker = PaperBroker(10_000)
+    broker.last_quotes["UP"] = Quote("UP", Decimal("2.99"), Decimal("3.01"), Decimal("3.0"))
+    snapshot = MarketSnapshot("UP", 3.0, 5.0, 500_000, 100_000, 2.99, 3.01, 2.80, 3.20)
+
+    # Score passes but only one signal group has real data.
+    thin = ConfirmationReport(
+        symbol="UP", score=0.8, net_capital_flow=0, large_flow_ratio=0.7,
+        analyst_buy_ratio=None, signals_present=1, passed=True,
+    )
+    loop = MonitorLoop(
+        broker,
+        BotConfig(min_signals_present=2, allow_fallback=False),
+        snapshot_provider=lambda: [snapshot],
+        confirmation=lambda symbol: thin,
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    summary = loop.run_once()
+
+    assert summary.entries == []
+    assert any(e.kind == "insufficient_signals" for e in summary.events)
+
+
+def test_quorum_allows_candidate_with_enough_signals() -> None:
+    from god_help_tradebot.confirm import ConfirmationReport
+
+    broker = PaperBroker(10_000)
+    broker.last_quotes["UP"] = Quote("UP", Decimal("2.99"), Decimal("3.01"), Decimal("3.0"))
+    snapshot = MarketSnapshot("UP", 3.0, 5.0, 500_000, 100_000, 2.99, 3.01, 2.80, 3.20)
+
+    rich = ConfirmationReport(
+        symbol="UP", score=0.8, net_capital_flow=0, large_flow_ratio=0.7,
+        analyst_buy_ratio=0.6, signals_present=2, passed=True,
+    )
+    loop = MonitorLoop(
+        broker,
+        BotConfig(min_signals_present=2, require_trend_alignment=False),
+        snapshot_provider=lambda: [snapshot],
+        confirmation=lambda symbol: rich,
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    summary = loop.run_once()
+
+    assert summary.entries[0].symbol == "UP"

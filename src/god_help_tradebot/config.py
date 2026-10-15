@@ -20,11 +20,14 @@ class BotConfig:
     position_pct_of_account: float = 0.0
     # Allow short entries on fade setups (requires a margin account).
     allow_shorts: bool = False
-    # Paradox mode: short the bullish picks instead of buying them (margin required).
-    flip_entries: bool = False
     # Bracket distances from the entry price (fixed percentages).
     stop_pct: float = 0.10
     target_pct: float = 0.30
+    # Accuracy gates: require real signal data and tape-aligned entries.
+    min_signals_present: int = 2
+    require_trend_alignment: bool = True
+    # Forced best-odds entry when nothing passes (keeps trading every session).
+    allow_fallback: bool = True
 
     def __post_init__(self) -> None:
         if self.max_symbol_price <= 0:
@@ -49,3 +52,5 @@ class BotConfig:
             raise ValueError("stop_pct must be between 0 and 1")
         if not 0.0 < self.target_pct < 1.0:
             raise ValueError("target_pct must be between 0 and 1")
+        if self.min_signals_present < 0 or self.min_signals_present > 4:
+            raise ValueError("min_signals_present must be between 0 and 4")

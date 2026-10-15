@@ -29,6 +29,7 @@ class ConfirmationReport:
     market_article_count: int = 0
     pattern_score: float | None = None
     pattern_name: str | None = None
+    signals_present: int | None = None
     passed: bool = False
 
 
@@ -189,6 +190,14 @@ def confirm_candidate(
     total_weight = sum(weight for _, weight in present)
     score = round(sum(value * weight for value, weight in present) / total_weight, 4) if present else 0.5
 
+    # Count signal groups backed by real data (not neutral fallbacks).
+    signals_present = (
+        (1 if large_ratio is not None else 0)
+        + (1 if buy_ratio is not None else 0)
+        + (1 if news_articles > 0 else 0)
+        + (1 if pattern_score is not None else 0)
+    )
+
     return ConfirmationReport(
         symbol=symbol.upper(),
         score=score,
@@ -201,6 +210,7 @@ def confirm_candidate(
         market_article_count=market_articles,
         pattern_score=pattern_score,
         pattern_name=pattern_name,
+        signals_present=signals_present,
         passed=score >= threshold,
     )
 
@@ -291,6 +301,13 @@ def confirm_candidate_bearish(
     total_weight = sum(weight for _, weight in present)
     score = round(sum(value * weight for value, weight in present) / total_weight, 4) if present else 0.5
 
+    signals_present = (
+        (1 if large_ratio is not None else 0)
+        + (1 if buy_ratio is not None else 0)
+        + (1 if news_articles > 0 else 0)
+        + (1 if pattern_score is not None else 0)
+    )
+
     return ConfirmationReport(
         symbol=symbol.upper(),
         score=score,
@@ -303,6 +320,7 @@ def confirm_candidate_bearish(
         market_article_count=market_articles,
         pattern_score=pattern_score,
         pattern_name=pattern_name,
+        signals_present=signals_present,
         passed=score >= threshold,
     )
 
