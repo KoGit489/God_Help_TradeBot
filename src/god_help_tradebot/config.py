@@ -33,6 +33,11 @@ class BotConfig:
     entry_cooldown_minutes: int = 15
     # Candidates must pass confirmation on two consecutive polls before entry.
     require_double_confirmation: bool = True
+    # Self-study cadence: every N recorded trading days, grade the strategy and
+    # target at least this many winning days in the window.
+    study_interval_days: int = 5
+    study_target_winning_days: int = 4
+    study_auto_improve: bool = True
 
     def __post_init__(self) -> None:
         if self.max_symbol_price <= 0:
@@ -61,3 +66,7 @@ class BotConfig:
             raise ValueError("min_signals_present must be between 0 and 4")
         if self.entry_cooldown_minutes < 0:
             raise ValueError("entry_cooldown_minutes cannot be negative")
+        if self.study_interval_days < 1:
+            raise ValueError("study_interval_days must be at least 1")
+        if self.study_target_winning_days < 1:
+            raise ValueError("study_target_winning_days must be at least 1")

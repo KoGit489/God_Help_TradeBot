@@ -35,6 +35,9 @@ _TUNABLES = {
     "allow_fallback": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "entry_cooldown_minutes": int,
     "require_double_confirmation": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
+    "study_interval_days": int,
+    "study_target_winning_days": int,
+    "study_auto_improve": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
 }
 
 

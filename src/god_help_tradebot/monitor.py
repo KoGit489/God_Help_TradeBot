@@ -84,6 +84,7 @@ class MonitorLoop:
         max_consecutive_errors: int = 5,
         error_backoff_seconds: float = 30.0,
         allow_shorts: bool | None = None,
+        recorder: Any | None = None,
     ) -> None:
         self.broker = broker
         self.config = config or BotConfig()
@@ -101,6 +102,7 @@ class MonitorLoop:
         self.max_consecutive_errors = max_consecutive_errors
         self.error_backoff_seconds = error_backoff_seconds
         self.allow_shorts = self.config.allow_shorts if allow_shorts is None else allow_shorts
+        self.recorder = recorder
         self._events_client: Any | None = None
         self._market_news: Any | None = None
         self._consecutive_errors = 0
@@ -242,6 +244,7 @@ class MonitorLoop:
         quote = self.broker.get_latest_quote(symbol)
         if quote is None:
             return
+        self._record_quotes([quote])
         if not self._can_trade_now():
             return
         session = self._exit_trading_session()
@@ -410,11 +413,34 @@ class MonitorLoop:
         snapshots = [s for s in self._gather_snapshots() if s.symbol not in self._entry_blocked]
         if not snapshots:
             return
+        self._record(snapshots)
 
         chosen = self._select_candidate(snapshots, summary)
         if chosen is None:
             return
         self._enter(chosen, summary)
+
+    def _record(self, snapshots: list[MarketSnapshot]) -> None:
+        """Persist this cycle's decision data for later study (best effort)."""
+        if self.recorder is None:
+            return
+        quotes = [
+            Quote(s.symbol, Decimal(str(s.bid)), Decimal(str(s.ask)), Decimal(str(s.price)))
+            for s in snapshots
+        ]
+        try:
+            self.recorder.record_step(self._now(), snapshots, quotes)
+        except Exception:
+            pass  # recording must never break a trading cycle
+
+    def _record_quotes(self, quotes: list[Quote]) -> None:
+        """Persist live quotes for held positions (best effort)."""
+        if self.recorder is None:
+            return
+        try:
+            self.recorder.record_step(self._now(), [], quotes)
+        except Exception:
+            pass
 
     def _gather_snapshots(self) -> list[MarketSnapshot]:
         """Combine momentum (gainers), pre-pop (most active), and loser discovery."""

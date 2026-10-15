@@ -17,7 +17,10 @@ from .broker import WebullSandboxBroker
 from .config import BotConfig
 from .confirm import confirm_candidate
 from .monitor import LoopEvent, LoopSummary, MonitorLoop
+from .recorder import SessionRecorder, list_recorded_days
 from .state import StateStore
+from .study import load_study_state, run_study, save_study_state, write_config_file
+from .schedule import get_trading_session
 
 LOG_FILE = Path("bot.log")
 
@@ -53,6 +56,10 @@ def run_bot(
     state_file: str | Path = "bot_state.json",
     log_file: str | Path = LOG_FILE,
     stop_flag: Callable[[], bool] | None = None,
+    record_data: bool = True,
+    data_dir: str | Path = "data",
+    study_state_file: str | Path = "study_state.json",
+    config_file: str | Path = "bot_config.json",
 ) -> LoopSummary:
     """Connect to the sandbox and run the monitoring loop until stopped.
 
@@ -75,6 +82,7 @@ def run_bot(
         allow_entries=allow_entries,
         use_events=use_events,
         state_store=StateStore(state_file),
+        recorder=SessionRecorder(data_dir) if record_data else None,
         poll_seconds=poll_seconds,
         max_polls=max_polls,
     )
@@ -106,6 +114,7 @@ def run_bot(
                 break
             if max_polls is not None and summary.polls >= max_polls:
                 break
+            _maybe_run_study(logger, config, data_dir, study_state_file, config_file)
             import time
 
             time.sleep(loop.error_backoff_seconds if loop._consecutive_errors else poll_seconds)
@@ -121,3 +130,46 @@ def run_bot(
 
 
 __all__ = ["run_bot", "LOG_FILE"]
+
+
+def _maybe_run_study(
+    logger: logging.Logger,
+    config: BotConfig,
+    data_dir: str | Path,
+    study_state_file: str | Path,
+    config_file: str | Path,
+) -> None:
+    """After the close on every Nth recorded day, grade the window and self-improve."""
+    from datetime import datetime
+
+    from .schedule import EASTERN
+
+    now = datetime.now(EASTERN)
+    session = get_trading_session(now.date())
+    if session is None or now < session.market_close:
+        return
+
+    state = load_study_state(study_state_file)
+    recorded_days = len(list_recorded_days(data_dir))
+    studied_through = int(state.get("studied_through", 0))
+    if recorded_days - studied_through < config.study_interval_days:
+        return
+
+    logger.info("study starting: %s recorded days", recorded_days)
+    report = run_study(
+        config,
+        data_dir=data_dir,
+        interval_days=config.study_interval_days,
+        target_winning_days=config.study_target_winning_days,
+        auto_improve=config.study_auto_improve,
+        config_writer=lambda improved: write_config_file(improved, config_file),
+    )
+    logger.info(
+        "study done: %s/%s winning days in window (target %s)",
+        report.window_winning_days,
+        report.window_total_days,
+        config.study_target_winning_days,
+    )
+    if report.change_applied:
+        logger.info("study improvement applied: %s", report.change_applied)
+    save_study_state({"studied_through": recorded_days}, study_state_file)

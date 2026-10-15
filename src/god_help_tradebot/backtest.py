@@ -78,9 +78,14 @@ def _quote_from(data: dict[str, Any]) -> Quote:
 
 
 def load_timeline(path: str | Path) -> list[dict[str, Any]]:
-    """Load a backtest timeline from JSON."""
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    steps = payload.get("steps", payload if isinstance(payload, list) else [])
+    """Load a backtest timeline from JSON ({"steps": [...]}) or recorded JSONL."""
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        payload = json.loads(text)
+        steps = payload.get("steps", payload if isinstance(payload, list) else [])
+    except json.JSONDecodeError:
+        # Recorded day files are JSONL: one step object per line.
+        steps = [json.loads(line) for line in text.splitlines() if line.strip()]
     if not isinstance(steps, list):
         raise ValueError("timeline must contain a 'steps' list")
     return steps
