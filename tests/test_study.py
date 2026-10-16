@@ -81,12 +81,21 @@ def _winning_day(day: str) -> list[dict]:
 
 
 def _losing_day(day: str) -> list[dict]:
-    return [
-        {"time": f"{day}T10:00:00-04:00", "snapshots": [{"symbol": "GOW", "price": 3.0, "change_percent": 5.0, "volume": 500_000, "average_volume": 100_000, "bid": 2.99, "ask": 3.01, "day_low": 2.80, "day_high": 3.20}], "quotes": [{"symbol": "GOW", "bid": 2.99, "ask": 3.01, "last": 3.0}]},
-        {"time": f"{day}T10:05:00-04:00", "snapshots": [], "quotes": [{"symbol": "GOW", "bid": 2.75, "ask": 2.76, "last": 2.75}]},
-        {"time": f"{day}T10:10:00-04:00", "snapshots": [], "quotes": [{"symbol": "GOW", "bid": 2.68, "ask": 2.69, "last": 2.68}]},
-        {"time": f"{day}T10:15:00-04:00", "snapshots": [], "quotes": [{"symbol": "GOW", "bid": 2.68, "ask": 2.69, "last": 2.68}]},
+    # The 10:05 dip fills the patient limit at 2.76 (bracket re-anchors to a
+    # 2.484 stop); the slide through 2.45 triggers the stop exit.
+    scan = {"symbol": "GOW", "price": 3.0, "change_percent": 5.0, "volume": 500_000, "average_volume": 100_000, "bid": 2.99, "ask": 3.01, "day_low": 2.80, "day_high": 3.20}
+    entry_quote = {"symbol": "GOW", "bid": 2.99, "ask": 3.01, "last": 3.0}
+    dip = {"symbol": "GOW", "bid": 2.75, "ask": 2.76, "last": 2.75}
+    drift = {"symbol": "GOW", "bid": 2.60, "ask": 2.61, "last": 2.60}
+    breach = {"symbol": "GOW", "bid": 2.45, "ask": 2.46, "last": 2.45}
+    steps = [
+        {"time": f"{day}T10:00:00-04:00", "snapshots": [scan], "quotes": [entry_quote]},
+        {"time": f"{day}T10:05:00-04:00", "snapshots": [], "quotes": [dip]},
+        {"time": f"{day}T10:10:00-04:00", "snapshots": [], "quotes": [drift]},
+        {"time": f"{day}T10:15:00-04:00", "snapshots": [], "quotes": [breach]},
+        {"time": f"{day}T10:20:00-04:00", "snapshots": [], "quotes": [breach]},
     ]
+    return steps
 
 
 def test_grade_days_skips_no_trade_days(tmp_path) -> None:

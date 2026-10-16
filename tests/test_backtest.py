@@ -47,7 +47,8 @@ def _timeline_winning_long() -> list[dict]:
 
 
 def _timeline_losing_long() -> list[dict]:
-    # Entry near 3.01; stop 10% below = 2.70; price slides through it.
+    # The dip at 10:05 drops INTO the patient limit: filled at 2.76, bracket
+    # re-anchors (stop 2.484). Price slides through it and the stop exits.
     return [
         {"time": "2026-10-07T10:00:00-04:00",
          "snapshots": [_snap("GOW", 3.00, 2.80, 3.20)],
@@ -56,12 +57,15 @@ def _timeline_losing_long() -> list[dict]:
          "snapshots": [_snap("GOW", 2.75, 2.70, 3.20)],
          "quotes": [_quote("GOW", 2.75, 2.76, 2.75)]},
         {"time": "2026-10-07T10:10:00-04:00",
-         "snapshots": [_snap("GOW", 2.69, 2.60, 3.20)],
-         "quotes": [_quote("GOW", 2.68, 2.69, 2.68)]},
-        # Final step fills the exit order placed in the previous step.
+         "snapshots": [_snap("GOW", 2.60, 2.50, 3.20)],
+         "quotes": [_quote("GOW", 2.60, 2.61, 2.60)]},
         {"time": "2026-10-07T10:15:00-04:00",
-         "snapshots": [_snap("GOW", 2.69, 2.60, 3.20)],
-         "quotes": [_quote("GOW", 2.68, 2.69, 2.68)]},
+         "snapshots": [_snap("GOW", 2.45, 2.40, 3.20)],
+         "quotes": [_quote("GOW", 2.45, 2.46, 2.45)]},
+        # Final step fills the stop-exit order placed in the previous step.
+        {"time": "2026-10-07T10:20:00-04:00",
+         "snapshots": [_snap("GOW", 2.45, 2.40, 3.20)],
+         "quotes": [_quote("GOW", 2.45, 2.46, 2.45)]},
     ]
 
 

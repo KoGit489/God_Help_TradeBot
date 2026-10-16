@@ -126,6 +126,12 @@ class MonitorLoop:
         # Live quote captured by the pre-entry spread check; reused for the
         # patient-limit price so we don't refetch.
         self._entry_quote: Quote | None = None
+        # Order bookkeeping for outcome logging: entry/exit orders we submitted,
+        # fills already logged, and entry fill prices for P&L math.
+        self._entry_order_ids: set[int] = set()
+        self._exit_order_ids: set[int] = set()
+        self._logged_fills: set[int] = set()
+        self._entry_fills: dict[str, Decimal] = {}
         # Consecutive confirmation passes per symbol/direction for double
         # confirmation; entries need two in a row when the config requires it.
         self._confirm_streak: dict[tuple[str, str], int] = {}
@@ -157,6 +163,7 @@ class MonitorLoop:
 
         self._sync_orders()
         self._chase_pending_limit_entry(summary)
+        self._log_fills(summary)
         positions = self.broker.get_positions()
         if self._pending_entry is not None:
             pending = positions.get(self._pending_entry)
@@ -272,6 +279,7 @@ class MonitorLoop:
                 summary.events.append(
                     LoopEvent("take_profit_order", symbol, f"submitted {position.quantity} at {quote.bid}")
                 )
+                self._exit_order_ids.add(order.order_id)
                 self._exit_blocked.pop(symbol, None)
             elif quote.bid <= plan.stop_price:
                 # The stop has already been breached — exit immediately with a
@@ -293,6 +301,7 @@ class MonitorLoop:
                 summary.events.append(
                     LoopEvent("stop_loss_order", symbol, f"submitted {position.quantity} at {quote.bid}")
                 )
+                self._exit_order_ids.add(order.order_id)
                 self._exit_blocked.pop(symbol, None)
         except Exception as exc:
             if self._is_deterministic_rejection(exc):
@@ -328,6 +337,7 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("take_profit_order", symbol, f"covered {quantity} at {quote.ask}")
             )
+            self._exit_order_ids.add(order.order_id)
             self._exit_blocked.pop(symbol, None)
         elif quote.ask >= plan.stop_price:
             # The stop has already been breached — cover immediately with a
@@ -348,6 +358,7 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("stop_loss_order", symbol, f"covered {quantity} at {quote.ask}")
             )
+            self._exit_order_ids.add(order.order_id)
             self._exit_blocked.pop(symbol, None)
 
     @staticmethod
@@ -395,6 +406,7 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("eod_flatten", symbol, f"market-sold {position.quantity} before close")
             )
+            self._exit_order_ids.add(order.order_id)
             self._flattened.add(symbol)
             self.exit_plans.pop(symbol, None)
 
@@ -568,6 +580,80 @@ class MonitorLoop:
             return orders.get(order_id)
         return None
 
+    def _tracked_orders(self) -> list[Any]:
+        """All locally tracked orders (PaperBroker.orders / Webull adapter._orders)."""
+        orders = getattr(self.broker, "orders", None)
+        if orders is None:
+            orders = getattr(self.broker, "_orders", None)
+        if isinstance(orders, dict):
+            return list(orders.values())
+        return []
+
+    def _log_fills(self, summary: LoopSummary) -> None:
+        """Log newly filled entries/exits with prices; exits include dollar P&L.
+
+        Entry fills also re-anchor the exit bracket to the ACTUAL fill price —
+        with patient-limit entries the fill can sit a few percent below the
+        decision price, and the bracket should guard what we truly paid.
+        """
+        for order in self._tracked_orders():
+            if (
+                order.order_id in self._logged_fills
+                or order.status is not OrderStatus.FILLED
+                or order.fill_price is None
+            ):
+                continue
+            if order.order_id in self._entry_order_ids:
+                self._on_entry_filled(order, summary)
+            elif order.order_id in self._exit_order_ids:
+                self._on_exit_filled(order, summary)
+            else:
+                continue  # not one of ours (e.g. externally submitted)
+            self._logged_fills.add(order.order_id)
+
+    def _on_entry_filled(self, order: Any, summary: LoopSummary) -> None:
+        """Record the entry fill and re-anchor the bracket to the true price."""
+        fill = order.fill_price
+        self._entry_fills[order.symbol] = fill
+        plan = self.exit_plans.get(order.symbol)
+        if plan is not None:
+            stop_pct = Decimal(str(self.config.stop_pct))
+            target_pct = Decimal(str(self.config.target_pct))
+            if plan.direction == "short":
+                target = fill * (Decimal("1") - target_pct)
+                stop = fill * (Decimal("1") + stop_pct)
+            else:
+                target = fill * (Decimal("1") + target_pct)
+                stop = fill * (Decimal("1") - stop_pct)
+            self.exit_plans[order.symbol] = ExitPlan(
+                symbol=order.symbol,
+                quantity=plan.quantity,
+                target_price=target,
+                stop_price=stop,
+                direction=plan.direction,
+            )
+            self._persist_plans()
+        summary.events.append(
+            LoopEvent("entry_filled", order.symbol, f"filled {order.quantity} @ {fill}; bracket anchored to fill")
+        )
+
+    def _on_exit_filled(self, order: Any, summary: LoopSummary) -> None:
+        """Log the exit fill with the trade's realized dollar P&L."""
+        fill = order.fill_price
+        verb = "covered" if order.side is OrderSide.BUY else "sold"
+        entry_price = self._entry_fills.pop(order.symbol, None)
+        if entry_price is None:
+            detail = f"{verb} {order.quantity} @ {fill} (entry price unknown)"
+        else:
+            if order.side is OrderSide.SELL:
+                pnl = (fill - entry_price) * order.quantity
+            else:  # buy-to-cover a short
+                pnl = (entry_price - fill) * order.quantity
+            sign = "+" if pnl >= 0 else "-"
+            outcome = "win" if pnl > 0 else ("loss" if pnl < 0 else "flat")
+            detail = f"{verb} {order.quantity} @ {fill} (entry {entry_price}) P&L {sign}${abs(pnl):,.2f} [{outcome}]"
+        summary.events.append(LoopEvent("exit_filled", order.symbol, detail))
+
     def _chase_pending_limit_entry(self, summary: LoopSummary) -> None:
         """Resolve a resting patient-limit entry each cycle.
 
@@ -615,6 +701,7 @@ class MonitorLoop:
                 return
             raise
         summary.entries.append(chased)
+        self._entry_order_ids.add(chased.order_id)
         summary.events.append(
             LoopEvent("entry_chase", symbol, "patient limit unfilled; chased at market")
         )
@@ -682,6 +769,7 @@ class MonitorLoop:
             raise
         summary.entries.append(order)
         self._pending_entry = snapshot.symbol
+        self._entry_order_ids.add(order.order_id)
         if use_limit:
             self._pending_limit = {
                 "order_id": order.order_id,
@@ -754,6 +842,7 @@ class MonitorLoop:
             raise
         summary.entries.append(order)
         self._pending_entry = snapshot.symbol
+        self._entry_order_ids.add(order.order_id)
         if use_limit:
             self._pending_limit = {
                 "order_id": order.order_id,
