@@ -57,7 +57,9 @@ def _passes_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
     return (
         bool(snapshot.symbol.strip())
         and 0 < snapshot.price <= config.max_symbol_price
-        and config.min_change_percent <= snapshot.change_percent <= config.max_change_percent
+        # Coil-not-spike: anything already up more than momentum_max_change_percent
+        # is too late to buy — we want the move BEFORE it happens.
+        and config.min_change_percent <= snapshot.change_percent <= config.momentum_max_change_percent
         and snapshot.volume >= config.min_average_volume
         and snapshot.relative_volume >= config.min_relative_volume
         and 0 < snapshot.bid <= snapshot.ask

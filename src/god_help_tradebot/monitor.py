@@ -120,6 +120,12 @@ class MonitorLoop:
         # Symbol with an entry order in flight (submitted but not yet visible as
         # a position); prevents double-entering during the settlement gap.
         self._pending_entry: str | None = None
+        # Resting patient-limit entry awaiting a fill; chased at market after
+        # entry_chase_polls polls, canceled at the flatten cutoff.
+        self._pending_limit: dict[str, Any] | None = None
+        # Live quote captured by the pre-entry spread check; reused for the
+        # patient-limit price so we don't refetch.
+        self._entry_quote: Quote | None = None
         # Consecutive confirmation passes per symbol/direction for double
         # confirmation; entries need two in a row when the config requires it.
         self._confirm_streak: dict[tuple[str, str], int] = {}
@@ -150,6 +156,7 @@ class MonitorLoop:
         summary.polls += 1
 
         self._sync_orders()
+        self._chase_pending_limit_entry(summary)
         positions = self.broker.get_positions()
         if self._pending_entry is not None:
             pending = positions.get(self._pending_entry)
@@ -475,7 +482,12 @@ class MonitorLoop:
         """
         for profiled in self._ranked_profiles(snapshots):
             symbol = profiled.candidate.snapshot.symbol
-            if self._passes_confirmation(symbol, summary, direction=self._profile_side(profiled.profile)):
+            if self._passes_confirmation(
+                symbol,
+                summary,
+                direction=self._profile_side(profiled.profile),
+                fast=profiled.profile == "prepop",
+            ):
                 return profiled, False
 
         # Forced fallback: relax gates progressively and take the best-odds survivor.
@@ -506,7 +518,10 @@ class MonitorLoop:
                 ProfiledCandidate(candidate, "loser")
                 for candidate in screen_loser_candidates(snapshots, self.config)
             ]
-        combined.sort(key=lambda item: item.candidate.score, reverse=True)
+        # Pre-pop leads: a coiling stock is worth more than an already-exploded
+        # one. Within each profile, the best score wins.
+        priority = {"prepop": 0, "momentum": 1, "fade": 2, "loser": 3, "fallback": 9}
+        combined.sort(key=lambda item: (priority.get(item.profile, 9), -item.candidate.score))
         return combined
 
     def _best_odds_fallback(
@@ -535,6 +550,75 @@ class MonitorLoop:
             )
         )
         return ProfiledCandidate(best, "fallback"), True
+
+    def _entry_limit_price(self, quote: Quote, direction: str) -> float:
+        """Limit a fraction of the spread inside the bid (longs) or ask (shorts)."""
+        spread = quote.ask - quote.bid
+        fraction = Decimal(str(self.config.entry_limit_spread_fraction))
+        if direction == "short":
+            return float(quote.ask - (spread * fraction))
+        return float(quote.bid + (spread * fraction))
+
+    def _local_order(self, order_id: Any) -> Any | None:
+        """Find a tracked order locally (PaperBroker.orders / Webull adapter._orders)."""
+        orders = getattr(self.broker, "orders", None)
+        if orders is None:
+            orders = getattr(self.broker, "_orders", None)
+        if isinstance(orders, dict):
+            return orders.get(order_id)
+        return None
+
+    def _chase_pending_limit_entry(self, summary: LoopSummary) -> None:
+        """Resolve a resting patient-limit entry each cycle.
+
+        The limit gets entry_chase_polls polls to fill; after that we take the
+        entry at market rather than miss the trade. Past the flatten cutoff we
+        cancel instead — no new fills into the close.
+        """
+        pending = self._pending_limit
+        if pending is None:
+            return
+        order = self._local_order(pending["order_id"])
+        if order is not None and order.status is not OrderStatus.OPEN:
+            self._pending_limit = None
+            if order.status is OrderStatus.CANCELED:
+                self._pending_entry = None
+                self.exit_plans.pop(pending["symbol"], None)
+            return  # FILLED: position management takes over
+        symbol = pending["symbol"]
+        if self._at_flatten_time():
+            self.broker.cancel_order(pending["order_id"])
+            self._pending_limit = None
+            self._pending_entry = None
+            self.exit_plans.pop(symbol, None)
+            summary.events.append(
+                LoopEvent("entry_canceled", symbol, "limit entry unfilled at the flatten cutoff; canceled")
+            )
+            return
+        pending["polls"] += 1
+        if pending["polls"] < self.config.entry_chase_polls:
+            return
+        try:
+            self.broker.cancel_order(pending["order_id"])
+            chased = self.broker.submit_order(
+                symbol, pending["side"], pending["quantity"], OrderType.MARKET,
+            )
+        except Exception as exc:
+            if self._is_deterministic_rejection(exc):
+                self._entry_blocked.add(symbol)
+                self._pending_limit = None
+                self._pending_entry = None
+                self.exit_plans.pop(symbol, None)
+                summary.events.append(
+                    LoopEvent("entry_blocked", symbol, "chase rejected by platform; skipped for today")
+                )
+                return
+            raise
+        summary.entries.append(chased)
+        summary.events.append(
+            LoopEvent("entry_chase", symbol, "patient limit unfilled; chased at market")
+        )
+        self._pending_limit = None
 
     def _enter(
         self,
@@ -565,10 +649,27 @@ class MonitorLoop:
             )
         except ValueError:
             return
+        # Patient entry: rest a limit just inside the spread instead of paying
+        # the full ask; if it doesn't fill within entry_chase_polls, chase it
+        # at market rather than miss the trade.
+        quote = self._entry_quote
+        use_limit = (
+            self.config.entry_chase_polls > 0
+            and quote is not None
+            and quote.symbol == snapshot.symbol
+            and quote.bid > 0
+            and quote.ask > quote.bid
+        )
         try:
-            order = self.broker.submit_order(
-                snapshot.symbol, OrderSide.BUY, plan.quantity, OrderType.MARKET,
-            )
+            if use_limit:
+                order = self.broker.submit_order(
+                    snapshot.symbol, OrderSide.BUY, plan.quantity, OrderType.LIMIT,
+                    limit_price=self._entry_limit_price(quote, "long"),
+                )
+            else:
+                order = self.broker.submit_order(
+                    snapshot.symbol, OrderSide.BUY, plan.quantity, OrderType.MARKET,
+                )
         except Exception as exc:
             if self._is_deterministic_rejection(exc):
                 # Platform rejected the entry (buying-power headroom, quantity
@@ -581,6 +682,14 @@ class MonitorLoop:
             raise
         summary.entries.append(order)
         self._pending_entry = snapshot.symbol
+        if use_limit:
+            self._pending_limit = {
+                "order_id": order.order_id,
+                "symbol": snapshot.symbol,
+                "side": OrderSide.BUY,
+                "quantity": plan.quantity,
+                "polls": 0,
+            }
         summary.events.append(
             LoopEvent(
                 "entry",
@@ -615,10 +724,26 @@ class MonitorLoop:
             )
         except ValueError:
             return
+        # Patient short entry: rest a limit just under the ask instead of
+        # selling straight into the bid; chased at market if unfilled.
+        quote = self._entry_quote
+        use_limit = (
+            self.config.entry_chase_polls > 0
+            and quote is not None
+            and quote.symbol == snapshot.symbol
+            and quote.bid > 0
+            and quote.ask > quote.bid
+        )
         try:
-            order = self.broker.submit_order(
-                snapshot.symbol, OrderSide.SHORT, plan.quantity, OrderType.MARKET,
-            )
+            if use_limit:
+                order = self.broker.submit_order(
+                    snapshot.symbol, OrderSide.SHORT, plan.quantity, OrderType.LIMIT,
+                    limit_price=self._entry_limit_price(quote, "short"),
+                )
+            else:
+                order = self.broker.submit_order(
+                    snapshot.symbol, OrderSide.SHORT, plan.quantity, OrderType.MARKET,
+                )
         except Exception as exc:
             if self._is_deterministic_rejection(exc):
                 self._entry_blocked.add(snapshot.symbol)
@@ -629,6 +754,14 @@ class MonitorLoop:
             raise
         summary.entries.append(order)
         self._pending_entry = snapshot.symbol
+        if use_limit:
+            self._pending_limit = {
+                "order_id": order.order_id,
+                "symbol": snapshot.symbol,
+                "side": OrderSide.SHORT,
+                "quantity": plan.quantity,
+                "polls": 0,
+            }
         summary.events.append(
             LoopEvent(
                 "entry",
@@ -646,9 +779,11 @@ class MonitorLoop:
 
     def _spread_ok_at_entry(self, symbol: str, summary: LoopSummary) -> bool:
         """Re-check the live spread right before entry; quotes may have widened."""
+        self._entry_quote = None
         quote = self.broker.get_latest_quote(symbol)
         if quote is None or quote.last <= 0:
             return True  # no fresh quote — don't block on missing information
+        self._entry_quote = quote
         spread_pct = ((quote.ask - quote.bid) / quote.last) * 100
         if spread_pct > self.config.max_spread_percent:
             summary.events.append(
@@ -687,7 +822,13 @@ class MonitorLoop:
                 return candidate
         return None
 
-    def _passes_confirmation(self, symbol: str, summary: LoopSummary, direction: str = "bullish") -> bool:
+    def _passes_confirmation(
+        self,
+        symbol: str,
+        summary: LoopSummary,
+        direction: str = "bullish",
+        fast: bool = False,
+    ) -> bool:
         if self.confirmation is None:
             return True
         report = self._confirm(symbol, direction)
@@ -704,9 +845,13 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("insufficient_signals", symbol, f"only {signals_present} signal group(s) with data")
             )
-        # Double confirmation: two consecutive passes before entry.
+        # Double confirmation: two consecutive passes before entry. Pre-pop
+        # candidates are early by definition — one pass is enough when enabled.
         key = (symbol, direction)
-        if passed and self.config.require_double_confirmation:
+        require_double = self.config.require_double_confirmation and not (
+            fast and self.config.prepop_fast_trigger
+        )
+        if passed and require_double:
             streak = self._confirm_streak.get(key, 0) + 1
             self._confirm_streak[key] = streak
             if streak < 2:

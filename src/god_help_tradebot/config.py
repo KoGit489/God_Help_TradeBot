@@ -33,6 +33,14 @@ class BotConfig:
     entry_cooldown_minutes: int = 15
     # Candidates must pass confirmation on two consecutive polls before entry.
     require_double_confirmation: bool = True
+    # Coil-not-spike: momentum entries already up more than this are too late.
+    momentum_max_change_percent: float = 20.0
+    # Patient entries: rest a limit this fraction inside the spread instead of
+    # paying the full ask; chase at market after this many polls if unfilled.
+    entry_limit_spread_fraction: float = 0.25
+    entry_chase_polls: int = 2
+    # Pre-pop candidates are early by definition: one confirmation pass suffices.
+    prepop_fast_trigger: bool = True
     # Self-study cadence: every N recorded trading days, grade the strategy and
     # target at least this many winning days in the window.
     study_interval_days: int = 5
@@ -58,6 +66,12 @@ class BotConfig:
             raise ValueError("max_spread_percent must be positive")
         if not 0.0 <= self.position_pct_of_account <= 1.0:
             raise ValueError("position_pct_of_account must be between 0 and 1")
+        if self.momentum_max_change_percent < self.min_change_percent:
+            raise ValueError("momentum_max_change_percent must be >= min_change_percent")
+        if not 0.0 <= self.entry_limit_spread_fraction <= 1.0:
+            raise ValueError("entry_limit_spread_fraction must be between 0 and 1")
+        if self.entry_chase_polls < 0:
+            raise ValueError("entry_chase_polls cannot be negative")
         if not 0.0 < self.stop_pct < 1.0:
             raise ValueError("stop_pct must be between 0 and 1")
         if not 0.0 < self.target_pct < 1.0:

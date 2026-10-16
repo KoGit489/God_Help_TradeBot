@@ -16,19 +16,31 @@ def _quote(symbol, bid, ask, last):
 
 
 def _timeline_winning_long() -> list[dict]:
-    # Entry at 10:00 near 3.01 ask; target 30% above = 3.90; price rallies past it.
+    # Patient limit rests at 2.995 (bid + 25% of spread); the rally never comes
+    # back to it, so after 2 polls the loop chases at market (fills at 3.01),
+    # then price rallies past the 3.90 target (30% above the 3.00 decision).
     return [
         {"time": "2026-10-07T10:00:00-04:00",
          "snapshots": [_snap("GOW", 3.00, 2.80, 3.20)],
          "quotes": [_quote("GOW", 2.99, 3.01, 3.00)]},
         {"time": "2026-10-07T10:05:00-04:00",
+         "snapshots": [_snap("GOW", 3.00, 2.80, 3.20)],
+         "quotes": [_quote("GOW", 2.99, 3.01, 3.00)]},
+        {"time": "2026-10-07T10:10:00-04:00",
+         "snapshots": [_snap("GOW", 3.00, 2.80, 3.20)],
+         "quotes": [_quote("GOW", 2.99, 3.01, 3.00)]},
+        # Chase market order fills on this step's quote.
+        {"time": "2026-10-07T10:15:00-04:00",
+         "snapshots": [_snap("GOW", 3.00, 2.80, 3.20)],
+         "quotes": [_quote("GOW", 2.99, 3.01, 3.00)]},
+        {"time": "2026-10-07T10:20:00-04:00",
          "snapshots": [_snap("GOW", 3.50, 2.80, 3.60)],
          "quotes": [_quote("GOW", 3.49, 3.51, 3.50)]},
-        {"time": "2026-10-07T10:10:00-04:00",
+        {"time": "2026-10-07T10:25:00-04:00",
          "snapshots": [_snap("GOW", 3.95, 2.80, 4.00)],
          "quotes": [_quote("GOW", 3.95, 3.96, 3.95)]},
-        # Final step fills the exit order placed in the previous step.
-        {"time": "2026-10-07T10:15:00-04:00",
+        # Final step fills the take-profit order placed in the previous step.
+        {"time": "2026-10-07T10:30:00-04:00",
          "snapshots": [_snap("GOW", 3.95, 2.80, 4.00)],
          "quotes": [_quote("GOW", 3.95, 3.96, 3.95)]},
     ]

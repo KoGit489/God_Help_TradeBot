@@ -62,12 +62,22 @@ def _write_day(directory: Path, day: str, steps: list[dict]) -> Path:
 
 
 def _winning_day(day: str) -> list[dict]:
-    return [
-        {"time": f"{day}T10:00:00-04:00", "snapshots": [{"symbol": "GOW", "price": 3.0, "change_percent": 5.0, "volume": 500_000, "average_volume": 100_000, "bid": 2.99, "ask": 3.01, "day_low": 2.80, "day_high": 3.20}], "quotes": [{"symbol": "GOW", "bid": 2.99, "ask": 3.01, "last": 3.0}]},
-        {"time": f"{day}T10:05:00-04:00", "snapshots": [], "quotes": [{"symbol": "GOW", "bid": 3.49, "ask": 3.51, "last": 3.50}]},
-        {"time": f"{day}T10:10:00-04:00", "snapshots": [], "quotes": [{"symbol": "GOW", "bid": 3.95, "ask": 3.96, "last": 3.95}]},
-        {"time": f"{day}T10:15:00-04:00", "snapshots": [], "quotes": [{"symbol": "GOW", "bid": 3.95, "ask": 3.96, "last": 3.95}]},
+    # Same shape as the backtest winning timeline: patient limit rests unfilled,
+    # chase fills at 3.01, rally carries through the 3.90 target.
+    scan = {"symbol": "GOW", "price": 3.0, "change_percent": 5.0, "volume": 500_000, "average_volume": 100_000, "bid": 2.99, "ask": 3.01, "day_low": 2.80, "day_high": 3.20}
+    flat = {"symbol": "GOW", "bid": 2.99, "ask": 3.01, "last": 3.0}
+    rally = {"symbol": "GOW", "bid": 3.49, "ask": 3.51, "last": 3.50}
+    top = {"symbol": "GOW", "bid": 3.95, "ask": 3.96, "last": 3.95}
+    steps = [
+        {"time": f"{day}T10:00:00-04:00", "snapshots": [scan], "quotes": [flat]},
+        {"time": f"{day}T10:05:00-04:00", "snapshots": [], "quotes": [flat]},
+        {"time": f"{day}T10:10:00-04:00", "snapshots": [], "quotes": [flat]},
+        {"time": f"{day}T10:15:00-04:00", "snapshots": [], "quotes": [flat]},
+        {"time": f"{day}T10:20:00-04:00", "snapshots": [], "quotes": [rally]},
+        {"time": f"{day}T10:25:00-04:00", "snapshots": [], "quotes": [top]},
+        {"time": f"{day}T10:30:00-04:00", "snapshots": [], "quotes": [top]},
     ]
+    return steps
 
 
 def _losing_day(day: str) -> list[dict]:

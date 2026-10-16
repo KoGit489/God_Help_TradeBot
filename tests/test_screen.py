@@ -99,3 +99,11 @@ def test_explosive_but_disqualified_still_gets_filtered() -> None:
     too_expensive = _explosive_snap("RICH", change=30, rvol=20, range_position=0.95, price=15.00)
 
     assert screen_candidates([too_expensive], BotConfig()) == []
+
+
+def test_momentum_chase_cap_rejects_extended_movers() -> None:
+    # Coil-not-spike: +25% is already too late by default; the cap is tunable.
+    extended = _explosive_snap("LATE", change=25, rvol=10, range_position=0.9)
+
+    assert screen_candidates([extended], BotConfig()) == []
+    assert len(screen_candidates([extended], BotConfig(momentum_max_change_percent=30.0))) == 1
