@@ -41,6 +41,10 @@ class BotConfig:
     entry_chase_polls: int = 2
     # Pre-pop candidates are early by definition: one confirmation pass suffices.
     prepop_fast_trigger: bool = True
+    # Paradox fallback: low-conviction fallback reads get traded the OPPOSITE
+    # way (bullish survivor -> short it, bearish survivor -> buy it). Genuine
+    # gate-passers always go with the grain.
+    paradox_fallback: bool = True
     # Self-study cadence: every N recorded trading days, grade the strategy and
     # target at least this many winning days in the window.
     study_interval_days: int = 5

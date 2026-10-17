@@ -506,7 +506,6 @@ class MonitorLoop:
         if not self.config.allow_fallback:
             return None
         return self._best_odds_fallback(snapshots, summary)
-
     @staticmethod
     def _profile_side(profile: str) -> str:
         """Bearish profiles (fade/loser) confirm against the mirrored bear stack."""
@@ -541,7 +540,13 @@ class MonitorLoop:
         snapshots: list[MarketSnapshot],
         summary: LoopSummary,
     ) -> tuple[ProfiledCandidate, bool] | None:
-        """Progressively relax screening gates and take the best-odds survivor."""
+        """Progressively relax screening gates and take the best-odds survivor.
+
+        Fallback picks are low-conviction BY DEFINITION — every gate just said
+        no. Both directions are considered: bullish survivors (momentum) and
+        bearish survivors (losers). With paradox_fallback on, the entry trades
+        the OPPOSITE direction of the read.
+        """
         relaxed = dataclasses.replace(
             self.config,
             min_change_percent=-5.0,
@@ -550,18 +555,36 @@ class MonitorLoop:
             min_average_volume=50_000,
             max_spread_percent=3.0,
         )
-        candidates = screen_candidates(snapshots, relaxed)
-        if not candidates:
+        bulls = screen_candidates(snapshots, relaxed)
+        # Bearish reads only count as "rejected by the gates" when the gates
+        # were actually allowed to consider them (shorts enabled). With shorts
+        # off, a loser was never a candidate — don't paradox-buy it.
+        bears: list[RankedCandidate] = []
+        if self.allow_shorts:
+            relaxed_bear = dataclasses.replace(relaxed, min_change_percent=1.0)
+            bears = screen_loser_candidates(snapshots, relaxed_bear)
+
+        best_bull = bulls[0] if bulls else None
+        best_bear = bears[0] if bears else None
+        if best_bull is None and best_bear is None:
             return None
-        best = candidates[0]
+        if best_bear is None or (best_bull is not None and best_bull.score >= best_bear.score):
+            summary.events.append(
+                LoopEvent(
+                    "fallback_entry_candidate",
+                    best_bull.snapshot.symbol,
+                    f"best-odds fallback, bullish read (score {best_bull.score})",
+                )
+            )
+            return ProfiledCandidate(best_bull, "fallback"), True
         summary.events.append(
             LoopEvent(
                 "fallback_entry_candidate",
-                best.snapshot.symbol,
-                f"best-odds fallback (score {best.score})",
+                best_bear.snapshot.symbol,
+                f"best-odds fallback, bearish read (score {best_bear.score})",
             )
         )
-        return ProfiledCandidate(best, "fallback"), True
+        return ProfiledCandidate(best_bear, "fallback_loser"), True
 
     def _entry_limit_price(self, quote: Quote, direction: str) -> float:
         """Limit a fraction of the spread inside the bid (longs) or ask (shorts)."""
@@ -713,15 +736,35 @@ class MonitorLoop:
         summary: LoopSummary,
     ) -> None:
         profiled, is_fallback = chosen
-        # With the grain only: bullish profiles buy, bearish profiles (fade/loser)
-        # short. No contrarian paths.
-        if profiled.profile in ("fade", "loser"):
+        # Paradox fallback: a low-conviction read gets traded the OPPOSITE way —
+        # bullish survivors get shorted, bearish survivors get bought. Genuine
+        # gate-passers (momentum/prepop/fade/loser) always go with the grain.
+        paradox = is_fallback and self.config.paradox_fallback
+        symbol = profiled.candidate.snapshot.symbol
+        go_short = profiled.profile in ("fade", "loser") or (paradox and profiled.profile == "fallback")
+        if go_short:
             if not self.allow_shorts:
+                if paradox and profiled.profile == "fallback":
+                    summary.events.append(
+                        LoopEvent(
+                            "fallback_paradox_blocked",
+                            symbol,
+                            "low-conviction bullish read would be shorted, but shorts are off; stood down",
+                        )
+                    )
                 return  # shorting not enabled
             if not self._market_open():
                 return  # Webull only accepts shorts during regular hours
+            if paradox and profiled.profile == "fallback":
+                summary.events.append(
+                    LoopEvent("paradox_fallback", symbol, "low-conviction bullish read; shorting it instead")
+                )
             self._enter_short(profiled, summary)
             return
+        if paradox and profiled.profile == "fallback_loser":
+            summary.events.append(
+                LoopEvent("paradox_fallback", symbol, "low-conviction bearish read; buying it instead")
+            )
         snapshot = profiled.candidate.snapshot
         if not is_fallback and not self._entry_gates_pass(snapshot.symbol, "long", summary):
             return
@@ -799,7 +842,8 @@ class MonitorLoop:
     def _enter_short(self, profiled: ProfiledCandidate, summary: LoopSummary) -> None:
         """Enter a short on a fade/loser candidate: stop above, target below."""
         snapshot = profiled.candidate.snapshot
-        if not self._entry_gates_pass(snapshot.symbol, "short", summary):
+        is_fallback = profiled.profile in ("fallback", "fallback_loser")
+        if not is_fallback and not self._entry_gates_pass(snapshot.symbol, "short", summary):
             return
         if not self._spread_ok_at_entry(snapshot.symbol, summary):
             return
@@ -865,6 +909,10 @@ class MonitorLoop:
             stop_price=plan.stop_price,
             direction="short",
         )
+        if is_fallback:
+            summary.events.append(
+                LoopEvent("fallback_entry", snapshot.symbol, "entered on relaxed best-odds gates")
+            )
 
     def _spread_ok_at_entry(self, symbol: str, summary: LoopSummary) -> bool:
         """Re-check the live spread right before entry; quotes may have widened."""

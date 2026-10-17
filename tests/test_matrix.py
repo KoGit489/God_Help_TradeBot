@@ -268,7 +268,7 @@ def test_quorum_allows_candidate_with_enough_signals() -> None:
     )
     loop = MonitorLoop(
         broker,
-        BotConfig(min_signals_present=2, require_trend_alignment=False),
+        BotConfig(min_signals_present=2, require_trend_alignment=False, allow_fallback=False),
         snapshot_provider=lambda: [snapshot],
         confirmation=lambda symbol: rich,
         now_provider=_open_now,
@@ -276,6 +276,9 @@ def test_quorum_allows_candidate_with_enough_signals() -> None:
         flatten_before_close=False,
     )
 
-    summary = loop.run_once()
+    first = loop.run_once()
+    assert not first.entries  # first pass arms the double-confirmation streak
+
+    summary = loop.run_once(first)
 
     assert summary.entries[0].symbol == "UP"

@@ -2,6 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from god_help_tradebot import BotConfig, MonitorLoop, PaperBroker
+from god_help_tradebot.paper import OrderSide
 from god_help_tradebot.screen import (
     MarketSnapshot,
     best_candidate,
@@ -102,6 +103,7 @@ def test_monitor_forces_fallback_entry_when_nothing_passes() -> None:
     fallback = _snapshot("ODDS", 4.00, change_percent=6.0, relative_volume=1.5, day_low=3.90, day_high=4.20)
     loop = MonitorLoop(
         broker,
+        BotConfig(allow_shorts=True),
         snapshot_provider=lambda: [fallback],
         now_provider=_open_market_now,
         allow_entries=True,
@@ -109,7 +111,9 @@ def test_monitor_forces_fallback_entry_when_nothing_passes() -> None:
 
     summary = loop.run_once()
 
+    # Paradox fallback: the low-conviction bullish read gets SHORTED.
     assert summary.entries[0].symbol == "ODDS"
+    assert summary.entries[0].side is OrderSide.SHORT
     assert any(e.kind == "fallback_entry" for e in summary.events)
     assert any(e.kind == "entry" and "[fallback]" in e.detail for e in summary.events)
 
@@ -140,6 +144,7 @@ def test_monitor_fallback_skips_confirmation() -> None:
 
     loop = MonitorLoop(
         broker,
+        BotConfig(allow_shorts=True),
         snapshot_provider=lambda: [fallback],
         confirmation=_confirmation,
         now_provider=_open_market_now,
