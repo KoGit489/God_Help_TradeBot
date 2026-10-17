@@ -45,6 +45,12 @@ class BotConfig:
     # way (bullish survivor -> short it, bearish survivor -> buy it). Genuine
     # gate-passers always go with the grain.
     paradox_fallback: bool = True
+    # Fallback entries wait for the tape to develop: none in the first hour
+    # after the open (the morning chaos is where weak reads lie most).
+    fallback_after_minutes: int = 60
+    # Paradox tape guard: never fade a read the tape is actively confirming —
+    # paradox shorts stand down on an up tape, paradox longs on a down tape.
+    paradox_trend_guard: bool = True
     # Self-study cadence: every N recorded trading days, grade the strategy and
     # target at least this many winning days in the window.
     study_interval_days: int = 5
@@ -76,6 +82,8 @@ class BotConfig:
             raise ValueError("entry_limit_spread_fraction must be between 0 and 1")
         if self.entry_chase_polls < 0:
             raise ValueError("entry_chase_polls cannot be negative")
+        if self.fallback_after_minutes < 0:
+            raise ValueError("fallback_after_minutes cannot be negative")
         if not 0.0 < self.stop_pct < 1.0:
             raise ValueError("stop_pct must be between 0 and 1")
         if not 0.0 < self.target_pct < 1.0:

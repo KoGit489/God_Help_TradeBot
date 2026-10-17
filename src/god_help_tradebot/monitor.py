@@ -505,7 +505,47 @@ class MonitorLoop:
         # Forced fallback: relax gates progressively and take the best-odds survivor.
         if not self.config.allow_fallback:
             return None
+        if not self._fallback_window_open():
+            return None  # the tape hasn't developed yet — no fading blind
         return self._best_odds_fallback(snapshots, summary)
+
+    def _paradox_tape_ok(self, symbol: str, direction: str, summary: LoopSummary) -> bool:
+        """Never fade a read the tape is actively confirming.
+
+        Paradox shorts stand down on an UP tape (the bullish read isn't weak —
+        it's RIGHT, and shorting it is a squeeze waiting to happen). Paradox
+        longs stand down on a DOWN tape. Unknown/flat tape is allowed through.
+        """
+        if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
+            return True
+        from .patterns import trend_direction
+
+        trend = trend_direction(self.broker, symbol)
+        if trend is None:
+            return True
+        blocked = (direction == "short" and trend == "up") or (direction == "long" and trend == "down")
+        if blocked:
+            summary.events.append(
+                LoopEvent(
+                    "paradox_tape_blocked",
+                    symbol,
+                    f"tape is {trend}; the read isn't weak, it's right — stood down",
+                )
+            )
+        return not blocked
+
+    def _fallback_window_open(self) -> bool:
+        """Fallback entries wait fallback_after_minutes after the open."""
+        minutes = self.config.fallback_after_minutes
+        if minutes <= 0:
+            return True
+        now = self._now()
+        session = get_trading_session(now.date())
+        if session is None:
+            return False
+        from datetime import timedelta
+
+        return now >= session.market_open + timedelta(minutes=minutes)
     @staticmethod
     def _profile_side(profile: str) -> str:
         """Bearish profiles (fade/loser) confirm against the mirrored bear stack."""
@@ -756,12 +796,16 @@ class MonitorLoop:
             if not self._market_open():
                 return  # Webull only accepts shorts during regular hours
             if paradox and profiled.profile == "fallback":
+                if not self._paradox_tape_ok(symbol, "short", summary):
+                    return
                 summary.events.append(
                     LoopEvent("paradox_fallback", symbol, "low-conviction bullish read; shorting it instead")
                 )
             self._enter_short(profiled, summary)
             return
         if paradox and profiled.profile == "fallback_loser":
+            if not self._paradox_tape_ok(symbol, "long", summary):
+                return
             summary.events.append(
                 LoopEvent("paradox_fallback", symbol, "low-conviction bearish read; buying it instead")
             )

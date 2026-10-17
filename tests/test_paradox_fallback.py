@@ -1,8 +1,10 @@
 """Paradox fallback: low-conviction fallback reads trade the OPPOSITE direction."""
 
 from datetime import datetime
+from types import SimpleNamespace
 
 from god_help_tradebot import BotConfig, MonitorLoop, PaperBroker
+from god_help_tradebot.broker import WebullSandboxBroker
 from god_help_tradebot.paper import OrderSide
 from god_help_tradebot.schedule import EASTERN
 from god_help_tradebot.screen import MarketSnapshot
@@ -122,7 +124,7 @@ def test_paradox_can_be_disabled_for_with_grain_fallback() -> None:
     broker = PaperBroker(10_000)
     loop = MonitorLoop(
         broker,
-        BotConfig(paradox_fallback=False),
+        BotConfig(paradox_fallback=False, fallback_after_minutes=0),
         snapshot_provider=lambda: [_bullish_fallback()],
         now_provider=_open_now,
         allow_entries=True,
@@ -133,3 +135,92 @@ def test_paradox_can_be_disabled_for_with_grain_fallback() -> None:
 
     assert summary.entries[0].side is OrderSide.BUY  # old behavior: with the read
     assert not any(e.kind == "paradox_fallback" for e in summary.events)
+
+
+# --- Safety rail 1: fallbacks wait for the tape to develop ---------------------
+
+
+def test_fallback_waits_for_the_first_hour() -> None:
+    broker = PaperBroker(10_000)
+    state = {"now": datetime(2026, 10, 7, 9, 50, tzinfo=EASTERN)}  # 20 min in
+    loop = MonitorLoop(
+        broker,
+        BotConfig(allow_shorts=True),
+        snapshot_provider=lambda: [_bullish_fallback()],
+        now_provider=lambda: state["now"],
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    first = loop.run_once()
+    assert not first.entries  # too early — nothing faded blind at the open
+
+    state["now"] = datetime(2026, 10, 7, 10, 40, tzinfo=EASTERN)  # past the hour
+    second = loop.run_once(first)
+    assert second.entries and second.entries[0].side is OrderSide.SHORT
+
+
+def test_fallback_window_is_tunable_to_zero() -> None:
+    broker = PaperBroker(10_000)
+    early = datetime(2026, 10, 7, 9, 50, tzinfo=EASTERN)
+    loop = MonitorLoop(
+        broker,
+        BotConfig(allow_shorts=True, fallback_after_minutes=0),
+        snapshot_provider=lambda: [_bullish_fallback()],
+        now_provider=lambda: early,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    assert loop.run_once().entries  # window disabled — fallback fires at 9:50
+
+
+# --- Safety rail 2: never fade a read the tape is confirming --------------------
+
+
+def _webull_stub_broker(trend: str, monkeypatch) -> WebullSandboxBroker:
+    """A minimally-connected Webull adapter whose tape reads `trend`."""
+    import god_help_tradebot.patterns as patterns
+
+    monkeypatch.setattr(patterns, "trend_direction", lambda broker, symbol: trend)
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.session = SimpleNamespace()  # marks it connected
+    broker._orders = {}
+    broker.get_positions = lambda: {}
+    return broker
+
+
+def test_paradox_short_stands_down_on_an_up_tape(monkeypatch) -> None:
+    # The bullish read isn't weak — it's RIGHT. Shorting it would be a squeeze.
+    broker = _webull_stub_broker("up", monkeypatch)
+    loop = MonitorLoop(
+        broker,
+        BotConfig(allow_shorts=True, fallback_after_minutes=0),
+        snapshot_provider=lambda: [_bullish_fallback()],
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    summary = loop.run_once()
+
+    assert summary.entries == []
+    assert any(e.kind == "paradox_tape_blocked" for e in summary.events)
+
+
+def test_paradox_long_stands_down_on_a_down_tape(monkeypatch) -> None:
+    # The bearish read is confirmed by the tape — don't catch the falling knife.
+    broker = _webull_stub_broker("down", monkeypatch)
+    loop = MonitorLoop(
+        broker,
+        BotConfig(allow_shorts=True, fallback_after_minutes=0),
+        snapshot_provider=lambda: [_bearish_fallback()],
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    summary = loop.run_once()
+
+    assert summary.entries == []
+    assert any(e.kind == "paradox_tape_blocked" for e in summary.events)

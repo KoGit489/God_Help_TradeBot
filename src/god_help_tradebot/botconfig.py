@@ -40,6 +40,8 @@ _TUNABLES = {
     "entry_chase_polls": int,
     "prepop_fast_trigger": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "paradox_fallback": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
+    "fallback_after_minutes": int,
+    "paradox_trend_guard": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "study_interval_days": int,
     "study_target_winning_days": int,
     "study_auto_improve": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
