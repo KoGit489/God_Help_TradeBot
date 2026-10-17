@@ -604,27 +604,36 @@ class MonitorLoop:
             relaxed_bear = dataclasses.replace(relaxed, min_change_percent=1.0)
             bears = screen_loser_candidates(snapshots, relaxed_bear)
 
-        best_bull = bulls[0] if bulls else None
-        best_bear = bears[0] if bears else None
+        # Paradox mode fades the read, so the WEAKEST conviction is the juiciest
+        # target (screens sort best-first, so take the tail). With-grain mode
+        # wants the strongest survivor, as before.
+        weakest = self.config.paradox_fallback
+        best_bull = (bulls[-1] if weakest else bulls[0]) if bulls else None
+        best_bear = (bears[-1] if weakest else bears[0]) if bears else None
         if best_bull is None and best_bear is None:
             return None
-        if best_bear is None or (best_bull is not None and best_bull.score >= best_bear.score):
-            summary.events.append(
-                LoopEvent(
-                    "fallback_entry_candidate",
-                    best_bull.snapshot.symbol,
-                    f"best-odds fallback, bullish read (score {best_bull.score})",
-                )
+        if best_bull is None:
+            chosen, profile = best_bear, "fallback_loser"
+        elif best_bear is None:
+            chosen, profile = best_bull, "fallback"
+        elif weakest:
+            chosen, profile = (
+                (best_bull, "fallback") if best_bull.score <= best_bear.score else (best_bear, "fallback_loser")
             )
-            return ProfiledCandidate(best_bull, "fallback"), True
+        else:
+            chosen, profile = (
+                (best_bull, "fallback") if best_bull.score >= best_bear.score else (best_bear, "fallback_loser")
+            )
+        read = "bullish" if profile == "fallback" else "bearish"
+        flavor = "weakest" if weakest else "best-odds"
         summary.events.append(
             LoopEvent(
                 "fallback_entry_candidate",
-                best_bear.snapshot.symbol,
-                f"best-odds fallback, bearish read (score {best_bear.score})",
+                chosen.snapshot.symbol,
+                f"{flavor} fallback, {read} read (score {chosen.score})",
             )
         )
-        return ProfiledCandidate(best_bear, "fallback_loser"), True
+        return ProfiledCandidate(chosen, profile), True
 
     def _entry_limit_price(self, quote: Quote, direction: str) -> float:
         """Limit a fraction of the spread inside the bid (longs) or ask (shorts)."""

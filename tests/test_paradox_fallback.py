@@ -224,3 +224,49 @@ def test_paradox_long_stands_down_on_a_down_tape(monkeypatch) -> None:
 
     assert summary.entries == []
     assert any(e.kind == "paradox_tape_blocked" for e in summary.events)
+
+
+# --- Weakest conviction is the paradox's juiciest target ------------------------
+
+
+def _two_bullish_survivors() -> list[MarketSnapshot]:
+    # Both fail the real gates (rvol < 2) but survive the relaxed fallback.
+    stronger = _snapshot("WEAK1", 4.00, change_percent=6.0, relative_volume=1.5, day_low=3.90, day_high=4.20)
+    weaker = _snapshot("WEAK2", 4.00, change_percent=2.0, relative_volume=1.2, day_low=3.95, day_high=4.10)
+    return [stronger, weaker]
+
+
+def test_paradox_fallback_targets_the_weakest_conviction() -> None:
+    broker = PaperBroker(10_000)
+    loop = MonitorLoop(
+        broker,
+        BotConfig(allow_shorts=True, fallback_after_minutes=0),
+        snapshot_provider=_two_bullish_survivors,
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    summary = loop.run_once()
+
+    # WEAK2 carries the lower score — the read most likely to fail — so the
+    # paradox shorts IT, not the stronger survivor.
+    assert summary.entries[0].symbol == "WEAK2"
+    assert summary.entries[0].side is OrderSide.SHORT
+
+
+def test_with_grain_fallback_keeps_the_strongest_conviction() -> None:
+    broker = PaperBroker(10_000)
+    loop = MonitorLoop(
+        broker,
+        BotConfig(paradox_fallback=False, fallback_after_minutes=0),
+        snapshot_provider=_two_bullish_survivors,
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    summary = loop.run_once()
+
+    assert summary.entries[0].symbol == "WEAK1"
+    assert summary.entries[0].side is OrderSide.BUY
