@@ -1,5 +1,8 @@
 from decimal import Decimal
 
+import pytest
+
+import god_help_tradebot.news as news_module
 from god_help_tradebot import BotConfig, MonitorLoop, PaperBroker, WebullSandboxBroker, WebullSdkSession
 from god_help_tradebot.confirm import (
     analyst_rating_score,
@@ -10,6 +13,14 @@ from god_help_tradebot.news import NewsReport, fetch_news_sentiment
 from god_help_tradebot.screen import MarketSnapshot
 from datetime import datetime
 from god_help_tradebot.schedule import EASTERN
+
+
+@pytest.fixture(autouse=True)
+def _clear_news_cache():
+    """The per-symbol daily news cache must not leak between tests."""
+    news_module._NEWS_CACHE.clear()
+    yield
+    news_module._NEWS_CACHE.clear()
 
 
 class _FakeResponse:

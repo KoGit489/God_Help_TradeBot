@@ -51,6 +51,10 @@ class BotConfig:
     # Paradox tape guard: never fade a read the tape is actively confirming —
     # paradox shorts stand down on an up tape, paradox longs on a down tape.
     paradox_trend_guard: bool = True
+    # Wide-net mode: rows pulled per screener list, and the max deep
+    # confirmations per poll cycle (protects the news quota on wide nets).
+    screener_list_limit: int = 100
+    max_confirmations_per_cycle: int = 5
     # Self-study cadence: every N recorded trading days, grade the strategy and
     # target at least this many winning days in the window.
     study_interval_days: int = 5
@@ -84,6 +88,10 @@ class BotConfig:
             raise ValueError("entry_chase_polls cannot be negative")
         if self.fallback_after_minutes < 0:
             raise ValueError("fallback_after_minutes cannot be negative")
+        if self.screener_list_limit < 1:
+            raise ValueError("screener_list_limit must be at least 1")
+        if self.max_confirmations_per_cycle < 1:
+            raise ValueError("max_confirmations_per_cycle must be at least 1")
         if not 0.0 < self.stop_pct < 1.0:
             raise ValueError("stop_pct must be between 0 and 1")
         if not 0.0 < self.target_pct < 1.0:

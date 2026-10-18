@@ -9,7 +9,9 @@ higher. Network or API failures degrade gracefully to neutral.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,12 @@ import requests
 NEWS_ENDPOINT = "https://www.alphavantage.co/query"
 NEWS_FUNCTION = "NEWS_SENTIMENT"
 DEFAULT_TIMEOUT = 10
+
+# Alpha Vantage's free tier allows ~25 requests/day. Real reports are cached
+# per symbol for the whole UTC day; empty/degraded results recheck after a
+# short TTL so a transient blip doesn't freeze a symbol's news all day.
+_NEWS_CACHE: dict[str, tuple[float, "NewsReport"]] = {}
+_EMPTY_REPORT_TTL_SECONDS = 600
 
 
 @dataclass(frozen=True)
@@ -74,6 +82,14 @@ def fetch_news_sentiment(
     symbol = symbol.upper()
     key = api_key or _env_api_key() or "demo"
 
+    cache_key = f"{symbol}:{datetime.now(timezone.utc).date().isoformat()}"
+    now = time.time()
+    cached = _NEWS_CACHE.get(cache_key)
+    if cached is not None:
+        cached_at, cached_report = cached
+        if cached_report.article_count > 0 or now - cached_at < _EMPTY_REPORT_TTL_SECONDS:
+            return cached_report
+
     try:
         response = requests.get(
             NEWS_ENDPOINT,
@@ -88,11 +104,15 @@ def fetch_news_sentiment(
         response.raise_for_status()
         payload = response.json()
     except Exception:
-        return NewsReport(symbol, 0.5, 0, None, 0, 0, 0)
+        report = NewsReport(symbol, 0.5, 0, None, 0, 0, 0)
+        _NEWS_CACHE[cache_key] = (now, report)
+        return report
 
     feed = payload.get("feed")
     if not isinstance(feed, list):
-        return NewsReport(symbol, 0.5, 0, None, 0, 0, 0)
+        report = NewsReport(symbol, 0.5, 0, None, 0, 0, 0)
+        _NEWS_CACHE[cache_key] = (now, report)
+        return report
 
     scores: list[float] = []
     bullish = bearish = neutral = 0
@@ -118,7 +138,9 @@ def fetch_news_sentiment(
 
     count = len(scores)
     if count == 0:
-        return NewsReport(symbol, 0.5, 0, None, 0, 0, 0)
+        report = NewsReport(symbol, 0.5, 0, None, 0, 0, 0)
+        _NEWS_CACHE[cache_key] = (now, report)
+        return report
 
     average = sum(scores) / count
     # Map sentiment from [-1, 1] to [0, 1].
@@ -128,7 +150,7 @@ def fetch_news_sentiment(
     # Blend: sentiment matters most, but more coverage strengthens the signal.
     score = round((sentiment_component * 0.7) + (coverage_component * 0.3 * sentiment_component), 4)
 
-    return NewsReport(
+    report = NewsReport(
         symbol=symbol,
         score=min(max(score, 0.0), 1.0),
         article_count=count,
@@ -137,6 +159,8 @@ def fetch_news_sentiment(
         bearish=bearish,
         neutral=neutral,
     )
+    _NEWS_CACHE[cache_key] = (now, report)
+    return report
 
 
 __all__ = ["NewsReport", "fetch_news_sentiment"]

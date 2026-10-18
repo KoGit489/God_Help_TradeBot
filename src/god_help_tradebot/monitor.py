@@ -136,6 +136,8 @@ class MonitorLoop:
         # confirmation; entries need two in a row when the config requires it.
         self._confirm_streak: dict[tuple[str, str], int] = {}
         self._confirm_streak_date: Any | None = None
+        # Deep confirmations spent this cycle; wide nets stay within budget.
+        self._confirm_budget_used = 0
 
         # Restore persisted exit plans so a restart never strands a position.
         if self.state_store is not None and not self.exit_plans:
@@ -422,6 +424,7 @@ class MonitorLoop:
     def _maybe_enter(self, summary: LoopSummary) -> None:
         if not self._market_open() or self._in_entry_cooldown():
             return
+        self._confirm_budget_used = 0  # fresh deep-check budget each cycle
         today = self._now().date()
         if self._entry_blocked_date != today:
             self._entry_blocked.clear()
@@ -469,11 +472,12 @@ class MonitorLoop:
             return []
         from .autoscreen import auto_screen_snapshots
 
-        snapshots = auto_screen_snapshots(self.broker, self.config, source="gainers")
-        prepop = auto_screen_snapshots(self.broker, self.config, source="most_active")
+        limit = self.config.screener_list_limit
+        snapshots = auto_screen_snapshots(self.broker, self.config, source="gainers", limit=limit)
+        prepop = auto_screen_snapshots(self.broker, self.config, source="most_active", limit=limit)
         # Losers join the hunt when shorting is enabled.
         losers = (
-            auto_screen_snapshots(self.broker, self.config, source="losers")
+            auto_screen_snapshots(self.broker, self.config, source="losers", limit=limit)
             if self.allow_shorts
             else []
         )
@@ -494,6 +498,11 @@ class MonitorLoop:
         """
         for profiled in self._ranked_profiles(snapshots):
             symbol = profiled.candidate.snapshot.symbol
+            if self._confirm_budget_used >= self.config.max_confirmations_per_cycle:
+                summary.events.append(
+                    LoopEvent("confirmation_budget", symbol, "deep-check budget spent; resumes next poll")
+                )
+                break
             if self._passes_confirmation(
                 symbol,
                 summary,
@@ -1021,6 +1030,7 @@ class MonitorLoop:
     ) -> bool:
         if self.confirmation is None:
             return True
+        self._confirm_budget_used += 1
         report = self._confirm(symbol, direction)
         score = getattr(report, "score", None)
         passed = getattr(report, "passed", None)

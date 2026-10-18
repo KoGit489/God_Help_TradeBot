@@ -42,6 +42,8 @@ _TUNABLES = {
     "paradox_fallback": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "fallback_after_minutes": int,
     "paradox_trend_guard": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
+    "screener_list_limit": int,
+    "max_confirmations_per_cycle": int,
     "study_interval_days": int,
     "study_target_winning_days": int,
     "study_auto_improve": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
