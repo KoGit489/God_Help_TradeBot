@@ -39,6 +39,9 @@ class BotConfig:
     # paying the full ask; chase at market after this many polls if unfilled.
     entry_limit_spread_fraction: float = 0.25
     entry_chase_polls: int = 2
+    # Exit watchdog: an unfilled exit order is chased aggressively after this
+    # many polls — a submitted exit is a promise, not a hope.
+    exit_chase_polls: int = 2
     # Pre-pop candidates are early by definition: one confirmation pass suffices.
     prepop_fast_trigger: bool = True
     # Paradox fallback: low-conviction fallback reads get traded the OPPOSITE
@@ -86,6 +89,8 @@ class BotConfig:
             raise ValueError("entry_limit_spread_fraction must be between 0 and 1")
         if self.entry_chase_polls < 0:
             raise ValueError("entry_chase_polls cannot be negative")
+        if self.exit_chase_polls < 1:
+            raise ValueError("exit_chase_polls must be at least 1")
         if self.fallback_after_minutes < 0:
             raise ValueError("fallback_after_minutes cannot be negative")
         if self.screener_list_limit < 1:

@@ -132,6 +132,11 @@ class MonitorLoop:
         self._exit_order_ids: set[int] = set()
         self._logged_fills: set[int] = set()
         self._entry_fills: dict[str, Decimal] = {}
+        # Exit orders in flight per symbol; one at a time, fill-verified, and
+        # chased aggressively by the watchdog when the market won't take them.
+        self._pending_exits: dict[str, dict[str, Any]] = {}
+        # Startup alarm fires once per run when a position exists at boot.
+        self._startup_positions_checked = False
         # Consecutive confirmation passes per symbol/direction for double
         # confirmation; entries need two in a row when the config requires it.
         self._confirm_streak: dict[tuple[str, str], int] = {}
@@ -171,6 +176,7 @@ class MonitorLoop:
             pending = positions.get(self._pending_entry)
             if pending is not None and pending.quantity != 0:
                 self._pending_entry = None  # fill is now visible; managed normally
+        self._watchdog_pending_exits(summary, positions)
         for symbol, position in positions.items():
             if position.quantity != 0:
                 summary.positions_seen[symbol] = position
@@ -178,6 +184,21 @@ class MonitorLoop:
 
         if self.flatten_before_close:
             self._maybe_flatten(positions, summary)
+
+        if not self._startup_positions_checked:
+            self._startup_positions_checked = True
+            for symbol, position in positions.items():
+                # No exit plan = orphaned (e.g. a flatten that never filled
+                # popped the plan). Managed restarts restore plans and stay quiet.
+                if position.quantity != 0 and symbol not in self.exit_plans:
+                    summary.events.append(
+                        LoopEvent(
+                            "startup_position",
+                            symbol,
+                            f"WARNING: {position.quantity} shares open at startup with NO exit plan; "
+                            "the day-trade rule may have been broken — managing it now",
+                        )
+                    )
 
         if self.allow_entries and not self._has_open_position(positions) and self._pending_entry is None:
             self._maybe_enter(summary)
@@ -257,6 +278,8 @@ class MonitorLoop:
         plan = self.exit_plans.get(symbol)
         if plan is None:
             return
+        if symbol in self._pending_exits:
+            return  # an exit order is already working; the watchdog chases it
         quote = self.broker.get_latest_quote(symbol)
         if quote is None:
             return
@@ -281,7 +304,7 @@ class MonitorLoop:
                 summary.events.append(
                     LoopEvent("take_profit_order", symbol, f"submitted {position.quantity} at {quote.bid}")
                 )
-                self._exit_order_ids.add(order.order_id)
+                self._track_exit(symbol, order, OrderSide.SELL, abs(position.quantity))
                 self._exit_blocked.pop(symbol, None)
             elif quote.bid <= plan.stop_price:
                 # The stop has already been breached — exit immediately with a
@@ -303,7 +326,7 @@ class MonitorLoop:
                 summary.events.append(
                     LoopEvent("stop_loss_order", symbol, f"submitted {position.quantity} at {quote.bid}")
                 )
-                self._exit_order_ids.add(order.order_id)
+                self._track_exit(symbol, order, OrderSide.SELL, abs(position.quantity))
                 self._exit_blocked.pop(symbol, None)
         except Exception as exc:
             if self._is_deterministic_rejection(exc):
@@ -339,7 +362,7 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("take_profit_order", symbol, f"covered {quantity} at {quote.ask}")
             )
-            self._exit_order_ids.add(order.order_id)
+            self._track_exit(symbol, order, OrderSide.BUY, quantity)
             self._exit_blocked.pop(symbol, None)
         elif quote.ask >= plan.stop_price:
             # The stop has already been breached — cover immediately with a
@@ -360,7 +383,7 @@ class MonitorLoop:
             summary.events.append(
                 LoopEvent("stop_loss_order", symbol, f"covered {quantity} at {quote.ask}")
             )
-            self._exit_order_ids.add(order.order_id)
+            self._track_exit(symbol, order, OrderSide.BUY, quantity)
             self._exit_blocked.pop(symbol, None)
 
     @staticmethod
@@ -399,16 +422,30 @@ class MonitorLoop:
         for symbol, position in positions.items():
             if position.quantity == 0 or symbol in self._flattened:
                 continue
+            if symbol in self._pending_exits:
+                continue  # an exit order is already working; the watchdog chases it
             # Longs sell to flatten; shorts buy to cover.
             side = OrderSide.SELL if position.quantity > 0 else OrderSide.BUY
-            order = self.broker.submit_order(
-                symbol, side, abs(position.quantity), OrderType.MARKET,
-            )
+            session = self._exit_trading_session()
+            if session == "NIGHT":
+                # Night session rejects market orders — rest an aggressive limit.
+                quote = self.broker.get_latest_quote(symbol)
+                if quote is None:
+                    continue  # no price to rest at; retry next poll
+                limit_price = float(quote.bid) if side is OrderSide.SELL else float(quote.ask)
+                order = self.broker.submit_order(
+                    symbol, side, abs(position.quantity), OrderType.LIMIT,
+                    limit_price=limit_price, trading_session="NIGHT",
+                )
+                detail = f"limit-sold {position.quantity} before close (night session)"
+            else:
+                order = self.broker.submit_order(
+                    symbol, side, abs(position.quantity), OrderType.MARKET,
+                )
+                detail = f"market-sold {position.quantity} before close"
             summary.exits.append(order)
-            summary.events.append(
-                LoopEvent("eod_flatten", symbol, f"market-sold {position.quantity} before close")
-            )
-            self._exit_order_ids.add(order.order_id)
+            summary.events.append(LoopEvent("eod_flatten", symbol, detail))
+            self._track_exit(symbol, order, side, abs(position.quantity))
             self._flattened.add(symbol)
             self.exit_plans.pop(symbol, None)
 
@@ -670,6 +707,77 @@ class MonitorLoop:
             return list(orders.values())
         return []
 
+    def _track_exit(self, symbol: str, order: Any, side: OrderSide, quantity: int) -> None:
+        """Register an in-flight exit order: one per symbol, fill-verified."""
+        self._exit_order_ids.add(order.order_id)
+        self._pending_exits[symbol] = {
+            "order_id": order.order_id,
+            "side": side,
+            "quantity": quantity,
+            "polls": 0,
+        }
+
+    def _watchdog_pending_exits(self, summary: LoopSummary, positions: dict[str, Position]) -> None:
+        """Verify exit orders actually fill; chase aggressively when they don't.
+
+        A submitted exit is a promise, not a hope: if the position is gone the
+        ghost order is canceled; if the order filled or died it's cleared; if
+        it's still resting after exit_chase_polls polls, cancel it and resubmit
+        harder — market in CORE hours, an aggressive limit in the night session.
+        """
+        for symbol, pending in list(self._pending_exits.items()):
+            position = positions.get(symbol)
+            order = self._local_order(pending["order_id"])
+            if position is None or position.quantity == 0:
+                if order is not None and order.status is OrderStatus.OPEN:
+                    try:
+                        self.broker.cancel_order(pending["order_id"])
+                        summary.events.append(
+                            LoopEvent("ghost_exit_canceled", symbol, "position already flat; canceled the stale exit order")
+                        )
+                    except Exception:
+                        pass
+                self._pending_exits.pop(symbol, None)
+                continue
+            if order is not None and order.status is not OrderStatus.OPEN:
+                self._pending_exits.pop(symbol, None)
+                continue  # FILLED is logged by _log_fills; CANCELED lets exit logic re-fire fresh
+            pending["polls"] += 1
+            if pending["polls"] < self.config.exit_chase_polls:
+                continue
+            side = pending["side"]
+            quantity = pending["quantity"]
+            try:
+                self.broker.cancel_order(pending["order_id"])
+                if self._market_open():
+                    chased = self.broker.submit_order(
+                        symbol, side, quantity, OrderType.MARKET, trading_session="CORE"
+                    )
+                else:
+                    quote = self.broker.get_latest_quote(symbol)
+                    if quote is None:
+                        self._pending_exits.pop(symbol, None)
+                        continue  # can't price a night limit; exit logic retries next poll
+                    price = float(quote.bid) if side is OrderSide.SELL else float(quote.ask)
+                    chased = self.broker.submit_order(
+                        symbol, side, quantity, OrderType.LIMIT,
+                        limit_price=price, trading_session="NIGHT",
+                    )
+            except Exception as exc:
+                if self._is_deterministic_rejection(exc):
+                    self._exit_blocked[symbol] = self._exit_trading_session()
+                    self._pending_exits.pop(symbol, None)
+                    summary.events.append(
+                        LoopEvent("exit_chase_blocked", symbol, "chase rejected by platform; retrying next session")
+                    )
+                    continue
+                raise
+            self._track_exit(symbol, chased, side, quantity)
+            summary.exits.append(chased)
+            summary.events.append(
+                LoopEvent("exit_chase", symbol, f"exit unfilled after {pending['polls']} polls; chased aggressively")
+            )
+
     def _log_fills(self, summary: LoopSummary) -> None:
         """Log newly filled entries/exits with prices; exits include dollar P&L.
 
@@ -721,6 +829,7 @@ class MonitorLoop:
     def _on_exit_filled(self, order: Any, summary: LoopSummary) -> None:
         """Log the exit fill with the trade's realized dollar P&L."""
         fill = order.fill_price
+        self._pending_exits.pop(order.symbol, None)
         verb = "covered" if order.side is OrderSide.BUY else "sold"
         entry_price = self._entry_fills.pop(order.symbol, None)
         if entry_price is None:
