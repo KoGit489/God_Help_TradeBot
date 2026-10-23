@@ -102,6 +102,7 @@ def run_bot(
 
     summary = LoopSummary()
     seen_events = 0
+    halted_on_errors = False
     try:
         while max_polls is None or summary.polls < max_polls:
             if stop_requested["flag"] or (stop_flag and stop_flag()):
@@ -111,6 +112,7 @@ def run_bot(
             seen_events = _log_events(logger, summary, seen_events)
             if loop._consecutive_errors >= loop.max_consecutive_errors:
                 logger.error("halting after %s consecutive errors", loop._consecutive_errors)
+                halted_on_errors = True
                 break
             if max_polls is not None and summary.polls >= max_polls:
                 break
@@ -125,6 +127,11 @@ def run_bot(
             except (ValueError, OSError):
                 pass
         logger.info("bot stopped: %s polls, %s entries, %s exits", summary.polls, len(summary.entries), len(summary.exits))
+
+    if halted_on_errors:
+        raise RuntimeError(
+            f"bot halted after {loop._consecutive_errors} consecutive poll errors"
+        )
 
     return summary
 

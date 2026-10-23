@@ -645,6 +645,8 @@ def _quote_from_snapshot(record: dict[str, Any]) -> Quote:
         bid=_decimal_field(record, "bid", default=last),
         ask=_decimal_field(record, "ask", default=last),
         last=last,
+        bid_volume=(Decimal(str(record["bid_volume"])) if record.get("bid_volume") not in (None, "") else None),
+        ask_volume=(Decimal(str(record["ask_volume"])) if record.get("ask_volume") not in (None, "") else None),
     )
 
 

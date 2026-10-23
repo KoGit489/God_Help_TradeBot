@@ -135,6 +135,7 @@ class MonitorLoop:
         # Exit orders in flight per symbol; one at a time, fill-verified, and
         # chased aggressively by the watchdog when the market won't take them.
         self._pending_exits: dict[str, dict[str, Any]] = {}
+        self._filled_exits_pending_reconcile: set[str] = set()
         # Startup alarm fires once per run when a position exists at boot.
         self._startup_positions_checked = False
         # Consecutive confirmation passes per symbol/direction for double
@@ -172,6 +173,18 @@ class MonitorLoop:
         self._chase_pending_limit_entry(summary)
         self._log_fills(summary)
         positions = self.broker.get_positions()
+        for symbol in self._filled_exits_pending_reconcile:
+            position = positions.get(symbol)
+            if position is None or position.quantity == 0:
+                self.exit_plans.pop(symbol, None)
+                self._entry_fills.pop(symbol, None)
+            else:
+                self._flattened.discard(symbol)
+        self._filled_exits_pending_reconcile.clear()
+        for symbol in list(self._entry_fills):
+            position = positions.get(symbol)
+            if position is None or position.quantity == 0:
+                self._entry_fills.pop(symbol, None)
         if self._pending_entry is not None:
             pending = positions.get(self._pending_entry)
             if pending is not None and pending.quantity != 0:
@@ -295,38 +308,36 @@ class MonitorLoop:
                 self._maybe_exit_short(symbol, position, plan, quote, session, summary)
                 return
             if quote.bid >= plan.target_price:
-                order = self.broker.submit_order(
-                    symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
-                    limit_price=float(plan.target_price),
-                    trading_session=session,
+                order, quantity = self._submit_exit_order(
+                    symbol, OrderSide.SELL, abs(position.quantity), OrderType.LIMIT,
+                    summary, trading_session=session, limit_price=float(plan.target_price),
                 )
                 summary.exits.append(order)
                 summary.events.append(
-                    LoopEvent("take_profit_order", symbol, f"submitted {position.quantity} at {quote.bid}")
+                    LoopEvent("take_profit_order", symbol, f"submitted {quantity} at {quote.bid}")
                 )
-                self._track_exit(symbol, order, OrderSide.SELL, abs(position.quantity))
+                self._track_exit(symbol, order, OrderSide.SELL, quantity)
                 self._exit_blocked.pop(symbol, None)
             elif quote.bid <= plan.stop_price:
                 # The stop has already been breached — exit immediately with a
                 # market order (a resting stop below the market is invalid).
                 # Night session accepts LIMIT only, so use an aggressive limit
                 # at the current bid outside regular hours.
-                if self._market_open():
-                    order = self.broker.submit_order(
-                        symbol, OrderSide.SELL, position.quantity, OrderType.MARKET,
-                        trading_session="CORE",
+                if self._core_session_open():
+                    order, quantity = self._submit_exit_order(
+                        symbol, OrderSide.SELL, abs(position.quantity), OrderType.MARKET,
+                        summary, trading_session="CORE",
                     )
                 else:
-                    order = self.broker.submit_order(
-                        symbol, OrderSide.SELL, position.quantity, OrderType.LIMIT,
-                        limit_price=float(quote.bid),
-                        trading_session="NIGHT",
+                    order, quantity = self._submit_exit_order(
+                        symbol, OrderSide.SELL, abs(position.quantity), OrderType.LIMIT,
+                        summary, trading_session="NIGHT", limit_price=float(quote.bid),
                     )
                 summary.exits.append(order)
                 summary.events.append(
-                    LoopEvent("stop_loss_order", symbol, f"submitted {position.quantity} at {quote.bid}")
+                    LoopEvent("stop_loss_order", symbol, f"submitted {quantity} at {quote.bid}")
                 )
-                self._track_exit(symbol, order, OrderSide.SELL, abs(position.quantity))
+                self._track_exit(symbol, order, OrderSide.SELL, quantity)
                 self._exit_blocked.pop(symbol, None)
         except Exception as exc:
             if self._is_deterministic_rejection(exc):
@@ -347,16 +358,15 @@ class MonitorLoop:
         summary: LoopSummary,
     ) -> None:
         """Short exit: buy to cover at the ask — target below entry, stop above."""
-        if not self._market_open():
+        if not self._core_session_open():
             return  # shorts can only be covered during regular hours
         quantity = abs(position.quantity)
         if quantity < 1:
             return
         if quote.ask <= plan.target_price:
-            order = self.broker.submit_order(
-                symbol, OrderSide.BUY, quantity, OrderType.LIMIT,
-                limit_price=float(plan.target_price),
-                trading_session=session,
+            order, quantity = self._submit_exit_order(
+                symbol, OrderSide.BUY, quantity, OrderType.LIMIT, summary,
+                limit_price=float(plan.target_price), trading_session=session,
             )
             summary.exits.append(order)
             summary.events.append(
@@ -368,16 +378,15 @@ class MonitorLoop:
             # The stop has already been breached — cover immediately with a
             # market buy (a resting stop above the market is invalid). Night
             # session accepts LIMIT only, so use an aggressive limit at the ask.
-            if self._market_open():
-                order = self.broker.submit_order(
-                    symbol, OrderSide.BUY, quantity, OrderType.MARKET,
+            if self._core_session_open():
+                order, quantity = self._submit_exit_order(
+                    symbol, OrderSide.BUY, quantity, OrderType.MARKET, summary,
                     trading_session="CORE",
                 )
             else:
-                order = self.broker.submit_order(
-                    symbol, OrderSide.BUY, quantity, OrderType.LIMIT,
-                    limit_price=float(quote.ask),
-                    trading_session="NIGHT",
+                order, quantity = self._submit_exit_order(
+                    symbol, OrderSide.BUY, quantity, OrderType.LIMIT, summary,
+                    limit_price=float(quote.ask), trading_session="NIGHT",
                 )
             summary.exits.append(order)
             summary.events.append(
@@ -396,9 +405,60 @@ class MonitorLoop:
             return "417" in str(exc) or "OPENAPI_" in str(exc)
         return int(status) == 417
 
+    @staticmethod
+    def _is_quantity_rejection(exc: Exception) -> bool:
+        message = str(exc).upper()
+        return any(
+            marker in message
+            for marker in (
+                "ORDER_RISK_RULE_SHARES",
+                "ORDER_QUANTITY_EXCEED_LIMIT",
+                "MAXIMUM QUANTITY",
+                "MAX ORDER QUANTITY",
+            )
+        )
+
+    def _submit_exit_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        quantity: int,
+        order_type: OrderType,
+        summary: LoopSummary,
+        *,
+        trading_session: str,
+        limit_price: float | None = None,
+    ) -> tuple[Any, int]:
+        """Retry a quantity-risk rejection with a smaller, managed exit order."""
+        requested = quantity
+        while requested > 0:
+            try:
+                order = self.broker.submit_order(
+                    symbol,
+                    side,
+                    requested,
+                    order_type,
+                    trading_session=trading_session,
+                    **({"limit_price": limit_price} if limit_price is not None else {}),
+                )
+                if requested < quantity:
+                    summary.events.append(
+                        LoopEvent(
+                            "exit_quantity_reduced",
+                            symbol,
+                            f"Webull rejected {quantity} shares; submitted {requested}; remainder remains managed",
+                        )
+                    )
+                return order, requested
+            except Exception as exc:
+                if not self._is_quantity_rejection(exc) or requested <= 1:
+                    raise
+                requested = max(1, requested // 2)
+        raise RuntimeError(f"unable to submit exit for {symbol}")
+
     def _can_trade_now(self) -> bool:
         """True during regular hours or the night session; false in dead zones."""
-        return self._market_open() or self._in_night_session()
+        return self._core_session_open() or self._in_night_session()
 
     def _in_night_session(self) -> bool:
         """Webull's night session runs 8 PM - 4 AM ET on trading days."""
@@ -409,12 +469,19 @@ class MonitorLoop:
         return minutes >= 20 * 60 or minutes < 4 * 60
 
     def _exit_trading_session(self) -> str:
-        return "CORE" if self._market_open() else "NIGHT"
+        if self._core_session_open():
+            return "CORE"
+        if self._in_night_session():
+            return "NIGHT"
+        return "CLOSED"
 
     def _maybe_flatten(self, positions: dict[str, Position], summary: LoopSummary) -> None:
         """Close all open positions at the end-of-day cutoff (no overnight holds)."""
         if not self._at_flatten_time():
             return
+        session = self._exit_trading_session()
+        if session == "CLOSED":
+            return  # wait through the 4–8 PM dead zone; retry in the night session
         today = self._now().date()
         if self._flattened_date != today:
             self._flattened.clear()
@@ -424,30 +491,41 @@ class MonitorLoop:
                 continue
             if symbol in self._pending_exits:
                 continue  # an exit order is already working; the watchdog chases it
+            if self._exit_blocked.get(symbol) == session:
+                continue  # deterministic rejection: retry only when the session changes
             # Longs sell to flatten; shorts buy to cover.
             side = OrderSide.SELL if position.quantity > 0 else OrderSide.BUY
-            session = self._exit_trading_session()
-            if session == "NIGHT":
-                # Night session rejects market orders — rest an aggressive limit.
-                quote = self.broker.get_latest_quote(symbol)
-                if quote is None:
-                    continue  # no price to rest at; retry next poll
-                limit_price = float(quote.bid) if side is OrderSide.SELL else float(quote.ask)
-                order = self.broker.submit_order(
-                    symbol, side, abs(position.quantity), OrderType.LIMIT,
-                    limit_price=limit_price, trading_session="NIGHT",
-                )
-                detail = f"limit-sold {position.quantity} before close (night session)"
-            else:
-                order = self.broker.submit_order(
-                    symbol, side, abs(position.quantity), OrderType.MARKET,
-                )
-                detail = f"market-sold {position.quantity} before close"
+            quantity = abs(position.quantity)
+            try:
+                if session == "NIGHT":
+                    # Night session rejects market orders — rest an aggressive limit.
+                    quote = self.broker.get_latest_quote(symbol)
+                    if quote is None:
+                        continue  # no price to rest at; retry next poll
+                    limit_price = float(quote.bid) if side is OrderSide.SELL else float(quote.ask)
+                    order, submitted_quantity = self._submit_exit_order(
+                        symbol, side, quantity, OrderType.LIMIT, summary,
+                        limit_price=limit_price, trading_session="NIGHT",
+                    )
+                    detail = f"limit-exit {submitted_quantity} before close (night session)"
+                else:
+                    order, submitted_quantity = self._submit_exit_order(
+                        symbol, side, quantity, OrderType.MARKET, summary,
+                        trading_session="CORE",
+                    )
+                    detail = f"market-exit {submitted_quantity} before close"
+            except Exception as exc:
+                if self._is_deterministic_rejection(exc):
+                    self._exit_blocked[symbol] = session
+                    summary.events.append(
+                        LoopEvent("exit_blocked", symbol, f"{session} rejected flatten ({_error_summary(exc)}); will retry next session")
+                    )
+                    continue
+                raise
             summary.exits.append(order)
             summary.events.append(LoopEvent("eod_flatten", symbol, detail))
-            self._track_exit(symbol, order, side, abs(position.quantity))
+            self._track_exit(symbol, order, side, submitted_quantity)
             self._flattened.add(symbol)
-            self.exit_plans.pop(symbol, None)
 
     def _at_flatten_time(self) -> bool:
         now = self._now()
@@ -731,27 +809,64 @@ class MonitorLoop:
             if position is None or position.quantity == 0:
                 if order is not None and order.status is OrderStatus.OPEN:
                     try:
-                        self.broker.cancel_order(pending["order_id"])
+                        if not self._cancel_confirmed(pending["order_id"], symbol, summary):
+                            continue
                         summary.events.append(
                             LoopEvent("ghost_exit_canceled", symbol, "position already flat; canceled the stale exit order")
                         )
                     except Exception:
                         pass
                 self._pending_exits.pop(symbol, None)
+                self.exit_plans.pop(symbol, None)
+                self._persist_plans()
                 continue
             if order is not None and order.status is not OrderStatus.OPEN:
                 self._pending_exits.pop(symbol, None)
+                if position is not None and position.quantity != 0:
+                    self._flattened.discard(symbol)
                 continue  # FILLED is logged by _log_fills; CANCELED lets exit logic re-fire fresh
+            session = self._exit_trading_session()
+            if session == "CLOSED":
+                if order is not None and order.status is OrderStatus.OPEN:
+                    try:
+                        if not self._cancel_confirmed(pending["order_id"], symbol, summary):
+                            continue
+                    except Exception:
+                        continue
+                self._pending_exits.pop(symbol, None)
+                self._flattened.discard(symbol)
+                summary.events.append(
+                    LoopEvent("exit_deferred", symbol, "market closed; will retry at the next supported session")
+                )
+                continue
             pending["polls"] += 1
             if pending["polls"] < self.config.exit_chase_polls:
                 continue
             side = pending["side"]
             quantity = pending["quantity"]
+            if isinstance(self.broker, WebullSandboxBroker):
+                quote = self.broker.get_latest_quote(symbol)
+                depth = None if quote is None else (
+                    quote.bid_volume if side is OrderSide.SELL else quote.ask_volume
+                )
+                if depth is None or not depth.is_finite() or depth <= 0:
+                    if not pending.get("liquidity_wait_logged"):
+                        summary.events.append(
+                            LoopEvent("exit_liquidity_wait", symbol, "exit remains pending; executable quote depth unavailable; no replacement submitted")
+                        )
+                        pending["liquidity_wait_logged"] = True
+                    continue
             try:
-                self.broker.cancel_order(pending["order_id"])
-                if self._market_open():
-                    chased = self.broker.submit_order(
-                        symbol, side, quantity, OrderType.MARKET, trading_session="CORE"
+                if not self._cancel_confirmed(pending["order_id"], symbol, summary):
+                    continue
+                current = self.broker.get_position(symbol)
+                if current is None or current.quantity == 0:
+                    continue
+                quantity = min(quantity, abs(current.quantity))
+                if session == "CORE":
+                    chased, quantity = self._submit_exit_order(
+                        symbol, side, quantity, OrderType.MARKET, summary,
+                        trading_session="CORE",
                     )
                 else:
                     quote = self.broker.get_latest_quote(symbol)
@@ -759,8 +874,8 @@ class MonitorLoop:
                         self._pending_exits.pop(symbol, None)
                         continue  # can't price a night limit; exit logic retries next poll
                     price = float(quote.bid) if side is OrderSide.SELL else float(quote.ask)
-                    chased = self.broker.submit_order(
-                        symbol, side, quantity, OrderType.LIMIT,
+                    chased, quantity = self._submit_exit_order(
+                        symbol, side, quantity, OrderType.LIMIT, summary,
                         limit_price=price, trading_session="NIGHT",
                     )
             except Exception as exc:
@@ -830,8 +945,9 @@ class MonitorLoop:
         """Log the exit fill with the trade's realized dollar P&L."""
         fill = order.fill_price
         self._pending_exits.pop(order.symbol, None)
+        self._filled_exits_pending_reconcile.add(order.symbol)
         verb = "covered" if order.side is OrderSide.BUY else "sold"
-        entry_price = self._entry_fills.pop(order.symbol, None)
+        entry_price = self._entry_fills.get(order.symbol)
         if entry_price is None:
             detail = f"{verb} {order.quantity} @ {fill} (entry price unknown)"
         else:
@@ -843,6 +959,28 @@ class MonitorLoop:
             outcome = "win" if pnl > 0 else ("loss" if pnl < 0 else "flat")
             detail = f"{verb} {order.quantity} @ {fill} (entry {entry_price}) P&L {sign}${abs(pnl):,.2f} [{outcome}]"
         summary.events.append(LoopEvent("exit_filled", order.symbol, detail))
+
+    def _cancel_confirmed(self, order_id: int, symbol: str, summary: LoopSummary) -> bool:
+        order = self._local_order(order_id)
+        self.broker.cancel_order(order_id)
+        if isinstance(self.broker, WebullSandboxBroker):
+            if order is not None:
+                order.status = OrderStatus.OPEN
+            record = (
+                self.broker.get_order_status(order.client_order_id)
+                if order is not None and order.client_order_id else None
+            )
+            status = str((record or {}).get("status", "")).upper()
+            if status not in ("CANCELED", "CANCELLED", "REJECTED", "EXPIRED"):
+                if order is not None:
+                    order.status = OrderStatus.OPEN
+                summary.events.append(
+                    LoopEvent("cancel_pending", symbol, "server cancellation not confirmed; replacement blocked")
+                )
+                return False
+            if order is not None:
+                order.status = OrderStatus.CANCELED
+        return True
 
     def _chase_pending_limit_entry(self, summary: LoopSummary) -> None:
         """Resolve a resting patient-limit entry each cycle.
@@ -863,7 +1001,8 @@ class MonitorLoop:
             return  # FILLED: position management takes over
         symbol = pending["symbol"]
         if self._at_flatten_time():
-            self.broker.cancel_order(pending["order_id"])
+            if not self._cancel_confirmed(pending["order_id"], symbol, summary):
+                return
             self._pending_limit = None
             self._pending_entry = None
             self.exit_plans.pop(symbol, None)
@@ -875,7 +1014,14 @@ class MonitorLoop:
         if pending["polls"] < self.config.entry_chase_polls:
             return
         try:
-            self.broker.cancel_order(pending["order_id"])
+            if not self._spread_ok_at_entry(symbol, summary):
+                return
+            if not self._cancel_confirmed(pending["order_id"], symbol, summary):
+                return
+            current = self.broker.get_position(symbol)
+            if current is not None and current.quantity != 0:
+                self._pending_limit = None
+                return
             chased = self.broker.submit_order(
                 symbol, pending["side"], pending["quantity"], OrderType.MARKET,
             )
@@ -1089,6 +1235,23 @@ class MonitorLoop:
         """Re-check the live spread right before entry; quotes may have widened."""
         self._entry_quote = None
         quote = self.broker.get_latest_quote(symbol)
+        if isinstance(self.broker, WebullSandboxBroker):
+            if (
+                quote is None
+                or quote.bid <= 0
+                or quote.ask < quote.bid
+                or quote.last <= 0
+                or quote.bid_volume is None
+                or quote.ask_volume is None
+                or not quote.bid_volume.is_finite()
+                or not quote.ask_volume.is_finite()
+                or quote.bid_volume <= 0
+                or quote.ask_volume <= 0
+            ):
+                summary.events.append(
+                    LoopEvent("liquidity_rejected", symbol, "Webull quote lacks positive two-sided depth; no entry submitted")
+                )
+                return False
         if quote is None or quote.last <= 0:
             return True  # no fresh quote — don't block on missing information
         self._entry_quote = quote
@@ -1213,7 +1376,13 @@ class MonitorLoop:
             return None
         return float(value) if value is not None else None
 
+    def _core_session_open(self) -> bool:
+        now = self._now()
+        session = get_trading_session(now.date())
+        return session is not None and session.market_open <= now < session.market_close
+
     def _market_open(self) -> bool:
+        """True during the entry window; new entries stop at the flatten cutoff."""
         now = self._now()
         session = get_trading_session(now.date())
         return session is not None and session.market_open <= now < session.exit_time

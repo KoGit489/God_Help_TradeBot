@@ -119,7 +119,7 @@ def test_monitor_flattens_positions_before_close() -> None:
 
     assert summary.exits[0].side.value == "SELL"
     assert any(e.kind == "eod_flatten" for e in summary.events)
-    assert "NIVF" not in loop.exit_plans
+    assert "NIVF" in loop.exit_plans  # retain recovery state until the fill is confirmed
 
 
 def test_monitor_does_not_flatten_midday() -> None:

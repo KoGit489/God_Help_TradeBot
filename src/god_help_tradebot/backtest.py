@@ -74,6 +74,8 @@ def _quote_from(data: dict[str, Any]) -> Quote:
         Decimal(str(data["bid"])),
         Decimal(str(data["ask"])),
         Decimal(str(data["last"])),
+        Decimal(str(data["bid_volume"])) if data.get("bid_volume") is not None else None,
+        Decimal(str(data["ask_volume"])) if data.get("ask_volume") is not None else None,
     )
 
 

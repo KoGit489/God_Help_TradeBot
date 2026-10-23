@@ -89,6 +89,38 @@ journalctl -u tradebot -f     # watch logs live
 
 ## Safety notes
 
+- Sandbox orders need executable streaming NBBO liquidity. A reference bid/ask
+  snapshot is not evidence that the sandbox matching engine can fill an order.
+  Webull entries now fail closed if `bid_volume` or `ask_volume` is absent or
+  nonpositive. Missing snapshot depth may therefore stop all entries until the
+  data feed is configured. Positive snapshot depth still does not guarantee a fill.
+- `exit_liquidity_wait` means an existing exit is still pending without usable
+  quote depth. The bot does not repeatedly cancel and replace it to manufacture
+  liquidity. `cancel_pending` means replacement is blocked awaiting server
+  confirmation. Neither event means the position is flat.
+- Entry cutoff (one minute before close) and CORE market close are separate.
+  Exits use CORE until the actual close, pause in unsupported hours, and may
+  retry in NIGHT if the symbol supports it. A fatal loop halt exits nonzero
+  so the unit's `Restart=on-failure` policy can act; this does not guarantee
+  execution or safe unattended restart with server-side working orders.
+
+### Resetting the sandbox
+
+1. Keep `tradebot` stopped while resetting. In the Webull Developer/Sandbox
+  portal, select the sandbox account used by `WEBULL_ACCOUNT_ID`, not a live
+  account or a separate app paper account.
+2. Per Trading API support's instructions, look under Account Center / Paper
+  Trading for Reset Account / Reset Assets. UI availability must be verified
+  after login. If absent, request the exact authenticated URL from support.
+  Do not use Reset Key: it rotates credentials, not account assets.
+3. After reset, query positions AND server-side open orders. Confirm both are
+  empty and verify the starting cash before resuming the service.
+4. Only then archive old local `data/`, `study_state.json`, and `bot_state.json`
+  before starting a fresh study. Deleting those files never resets Webull.
+5. Support recommends AAPL/TSLA/SPY for order-flow checks. They may exceed the
+  strategy's price ceiling; use a separate sandbox test rather than relaxing
+  strategy filters. Local paper replays do not prove sandbox execution quality.
+
 - The bot only ever talks to `api.sandbox.webull.com` — simulated money.
 - Never commit `.env` or real keys. On the server, prefer systemd `Environment=`
   or a locked-down `.env` (`chmod 600 .env`).

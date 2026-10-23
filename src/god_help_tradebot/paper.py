@@ -27,6 +27,8 @@ class Quote:
     bid: Decimal
     ask: Decimal
     last: Decimal
+    bid_volume: Decimal | None = None
+    ask_volume: Decimal | None = None
 
 
 @dataclass

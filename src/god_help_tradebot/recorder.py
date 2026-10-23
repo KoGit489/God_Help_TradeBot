@@ -66,6 +66,8 @@ class SessionRecorder:
             "bid": float(quote.bid),
             "ask": float(quote.ask),
             "last": float(quote.last),
+            "bid_volume": str(quote.bid_volume) if quote.bid_volume is not None else None,
+            "ask_volume": str(quote.ask_volume) if quote.ask_volume is not None else None,
         }
 
 

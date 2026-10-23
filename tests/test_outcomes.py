@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from god_help_tradebot import BotConfig, MonitorLoop, PaperBroker, Quote
 from god_help_tradebot.monitor import ExitPlan
-from god_help_tradebot.paper import Position
+from god_help_tradebot.paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position
 from god_help_tradebot.schedule import EASTERN
 from god_help_tradebot.screen import MarketSnapshot
 
@@ -110,3 +110,28 @@ def test_exit_fill_without_known_entry_still_logs() -> None:
     assert filled, "expected an exit_filled event"
     assert "entry price unknown" in filled[0].detail
     assert "@ 3.26" in filled[0].detail
+
+
+def test_partial_exit_fills_keep_entry_reference_for_pnl() -> None:
+    loop = MonitorLoop(PaperBroker(10_000), now_provider=_open_now, flatten_before_close=False)
+    loop._entry_fills["GOW"] = Decimal("2.50")
+    from god_help_tradebot.monitor import LoopSummary
+
+    result = LoopSummary()
+    for order_id, fill_price in ((1, "2.40"), (2, "2.35")):
+        order = PaperOrder(
+            order_id=order_id,
+            symbol="GOW",
+            side=OrderSide.SELL,
+            quantity=50,
+            order_type=OrderType.MARKET,
+            status=OrderStatus.FILLED,
+            fill_price=Decimal(fill_price),
+        )
+        loop._on_exit_filled(order, result)
+
+    exit_events = [event for event in result.events if event.kind == "exit_filled"]
+    assert len(exit_events) == 2
+    assert all("(entry 2.50)" in event.detail for event in exit_events)
+    assert "P&L -$5.00" in exit_events[0].detail
+    assert "P&L -$7.50" in exit_events[1].detail

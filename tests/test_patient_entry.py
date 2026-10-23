@@ -8,6 +8,23 @@ from god_help_tradebot import BotConfig, MonitorLoop, PaperBroker, Quote
 from god_help_tradebot.paper import OrderType
 from god_help_tradebot.schedule import EASTERN
 from god_help_tradebot.screen import MarketSnapshot
+from god_help_tradebot.broker import WebullSandboxBroker, _quote_from_snapshot
+from god_help_tradebot.monitor import LoopSummary
+
+
+def test_webull_quote_preserves_depth_and_rejects_missing_liquidity() -> None:
+    record = {"symbol": "RMSG", "price": "0.25", "bid": "0.24", "ask": "0.25"}
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.get_latest_quote = lambda symbol: _quote_from_snapshot(record)
+    loop = MonitorLoop(broker, now_provider=_open_now)
+    summary = LoopSummary()
+    assert not loop._spread_ok_at_entry("RMSG", summary)
+    assert summary.events[-1].kind == "liquidity_rejected"
+    record.update(bid_volume="100", ask_volume="200", bid="0.249")
+    assert loop._spread_ok_at_entry("RMSG", summary)
+    assert loop._entry_quote.bid_volume == Decimal("100")
+    record["bid_volume"] = "0"
+    assert not loop._spread_ok_at_entry("RMSG", summary)
 
 
 def _open_now() -> datetime:
