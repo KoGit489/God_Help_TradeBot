@@ -47,6 +47,33 @@ def _open_now() -> datetime:
     return datetime(2026, 10, 7, 11, 0, tzinfo=EASTERN)
 
 
+def test_fill_racing_cancel_blocks_replacement() -> None:
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    order = PaperOrder(1, "RMSG", OrderSide.SELL, 1000, OrderType.MARKET, client_order_id="test")
+    broker._orders = {1: order}
+    records = iter([{"status": "SUBMITTED"}, {"status": "FILLED", "filled_avg_price": "0.25"}])
+    broker.get_order_status = lambda client_order_id: next(records)
+    broker.cancel_order = lambda order_id: setattr(order, "status", OrderStatus.CANCELED)
+    loop = MonitorLoop(broker, now_provider=_open_now)
+    result = LoopSummary()
+    assert not loop._cancel_confirmed(1, "RMSG", result)
+    assert order.status is OrderStatus.FILLED
+    assert order.fill_price == Decimal("0.25")
+    assert result.events[-1].kind == "cancel_raced_fill"
+
+
+def test_failed_ghost_cancel_keeps_order_tracked() -> None:
+    loop, broker = _loop_with_long_position()
+    loop.run_once()
+    broker.positions["GOW"] = Position()
+    def fail_cancel(order_id):
+        raise ConnectionError("cancel unavailable")
+    broker.cancel_order = fail_cancel
+    summary = loop.run_once()
+    assert "GOW" in loop._pending_exits
+    assert any(event.kind == "error" for event in summary.events)
+
+
 def _quote(symbol: str, bid: str, ask: str) -> Quote:
     return Quote(symbol, Decimal(bid), Decimal(ask), Decimal(bid))
 

@@ -134,23 +134,32 @@ def run_study(
     report.window_winning_days = _winning_days(window)
     report.met_target = report.window_winning_days >= target_winning_days
 
-    if report.met_target or not auto_improve:
+    if report.met_target or not auto_improve or len(window) < interval_days:
         return report
 
     # Below target: try bounded variants, but only keep ones whose improvement
     # persists across the full recorded history (the anti-overfitting rule).
     base_window_wins = report.window_winning_days
     base_all_wins = _winning_days(grades)
+    window_dates = {grade.day for grade in window}
+    earlier_wins = {grade.day for grade in grades[:-interval_days] if grade.winning}
     best: tuple[str, BotConfig, list[DayGrade]] | None = None
+    best_window_wins = base_window_wins
 
     for label, variant in _candidate_variants(config):
         variant_grades = grade_days(day_files, variant)
         report.variants_tried += 1
-        variant_window_wins = _winning_days(variant_grades[-interval_days:])
+        variant_window_wins = _winning_days([grade for grade in variant_grades if grade.day in window_dates])
         variant_all_wins = _winning_days(variant_grades)
-        if variant_window_wins > base_window_wins and variant_all_wins >= base_all_wins:
-            if best is None or variant_window_wins > _winning_days(best[2][-interval_days:]):
+        variant_winning_dates = {grade.day for grade in variant_grades if grade.winning}
+        if (
+            variant_window_wins > base_window_wins
+            and variant_all_wins >= base_all_wins
+            and earlier_wins <= variant_winning_dates
+        ):
+            if best is None or variant_window_wins > best_window_wins:
                 best = (label, variant, variant_grades)
+                best_window_wins = variant_window_wins
 
     if best is not None:
         label, variant, _ = best
@@ -163,17 +172,11 @@ def run_study(
 
 def write_config_file(config: BotConfig, path: str | Path) -> None:
     """Persist the improved config atomically to the bot_config.json file."""
-    payload = {
-        "stop_pct": config.stop_pct,
-        "target_pct": config.target_pct,
-        "min_signals_present": config.min_signals_present,
-        "entry_cooldown_minutes": config.entry_cooldown_minutes,
-        "position_pct_of_account": config.position_pct_of_account,
-        "allow_shorts": config.allow_shorts,
-        "allow_fallback": config.allow_fallback,
-        "require_double_confirmation": config.require_double_confirmation,
-        "require_trend_alignment": config.require_trend_alignment,
-    }
+    target = Path(path)
+    payload = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+    if not isinstance(payload, dict):
+        raise ValueError("config file must contain an object")
+    payload.update(dataclasses.asdict(config))
     _write_json_atomic(payload, path)
 
 

@@ -152,3 +152,42 @@ def test_study_does_nothing_without_recorded_days(tmp_path) -> None:
     report = run_study(BotConfig(), data_dir=tmp_path / "empty")
     assert report.days_studied == []
     assert report.change_applied is None
+
+
+def test_study_waits_for_complete_traded_day_window(tmp_path) -> None:
+    _write_day(tmp_path, "2026-10-07", _losing_day("2026-10-07"))
+    report = run_study(BotConfig(allow_fallback=False), data_dir=tmp_path)
+    assert report.window_total_days == 1
+    assert report.variants_tried == 0
+    assert report.change_applied is None
+
+
+def test_study_rejects_recent_gain_that_sacrifices_earlier_win(tmp_path, monkeypatch) -> None:
+    import god_help_tradebot.study as study
+
+    for day in range(5, 15):
+        _write_day(tmp_path, f"2026-10-{day:02d}", [])
+    config = BotConfig()
+    def fake_grades(files, candidate):
+        wins = {0, 5} if candidate == config else {5, 6, 7, 8}
+        return [study.DayGrade(path.stem, 1, Decimal(1 if index in wins else -1), index in wins)
+                for index, path in enumerate(files)]
+    monkeypatch.setattr(study, "grade_days", fake_grades)
+    written = []
+    report = study.run_study(config, data_dir=tmp_path, config_writer=written.append)
+    assert report.variants_tried > 0
+    assert report.change_applied is None
+    assert not written
+
+
+def test_study_writer_preserves_all_settings(tmp_path) -> None:
+    import json
+    from dataclasses import asdict
+    from god_help_tradebot.study import write_config_file
+
+    path = tmp_path / "bot_config.json"
+    path.write_text(json.dumps({"custom_setting": "keep"}), encoding="utf-8")
+    config = BotConfig(screener_list_limit=75, paradox_fallback=False, fallback_after_minutes=90)
+    write_config_file(config, path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved == {"custom_setting": "keep", **asdict(config)}

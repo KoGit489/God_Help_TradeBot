@@ -175,3 +175,29 @@ def test_prepop_beats_momentum_in_selection_order() -> None:
 
     assert summary.entries[0].symbol == "QUIET"
     assert "[prepop]" in summary.events[0].detail
+
+
+def test_pending_genuine_confirmation_does_not_trigger_paradox() -> None:
+    loop = MonitorLoop(
+        _broker_with_quote(), BotConfig(allow_shorts=True),
+        confirmation=_always_pass, snapshot_provider=lambda: [_snap()],
+        now_provider=_open_now, allow_entries=True, flatten_before_close=False,
+    )
+    first = loop.run_once()
+    assert not first.entries
+    assert not any(event.kind == "paradox_fallback" for event in first.events)
+    second = loop.run_once(first)
+    assert second.entries[0].side.value == "BUY"
+
+
+def test_budget_exhaustion_is_not_a_failed_signal() -> None:
+    loop = MonitorLoop(
+        _broker_with_quote(), BotConfig(allow_shorts=True, max_confirmations_per_cycle=1),
+        confirmation=lambda symbol: SimpleNamespace(score=0.1, passed=False, signals_present=3),
+        snapshot_provider=lambda: [_snap("FIRST"), _snap("SECOND")],
+        now_provider=_open_now, allow_entries=True, flatten_before_close=False,
+    )
+    result = loop.run_once()
+    assert not result.entries
+    assert any(event.kind == "confirmation_budget" for event in result.events)
+    assert not any(event.kind == "paradox_fallback" for event in result.events)

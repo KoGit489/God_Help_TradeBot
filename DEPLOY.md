@@ -102,16 +102,17 @@ journalctl -u tradebot -f     # watch logs live
   Exits use CORE until the actual close, pause in unsupported hours, and may
   retry in NIGHT if the symbol supports it. A fatal loop halt exits nonzero
   so the unit's `Restart=on-failure` policy can act; this does not guarantee
-  execution or safe unattended restart with server-side working orders.
+  execution. Startup now queries server-side open orders and refuses to start
+  if any exist or their response cannot be verified. Resolve those orders
+  explicitly before restarting; the bot does not silently cancel them.
 
 ### Resetting the sandbox
 
-1. Keep `tradebot` stopped while resetting. In the Webull Developer/Sandbox
-  portal, select the sandbox account used by `WEBULL_ACCOUNT_ID`, not a live
-  account or a separate app paper account.
-2. Per Trading API support's instructions, look under Account Center / Paper
-  Trading for Reset Account / Reset Assets. UI availability must be verified
-  after login. If absent, request the exact authenticated URL from support.
+1. Keep `tradebot` stopped while resetting. Webull support confirmed that this
+  deployment's API test account is linked to its app paper-trading account.
+  Select that linked account, never a live brokerage account.
+2. Use the linked paper-trading account's Reset Account / Reset Assets control.
+  Do not assume the same linkage for another account: verify it with Webull.
   Do not use Reset Key: it rotates credentials, not account assets.
 3. After reset, query positions AND server-side open orders. Confirm both are
   empty and verify the starting cash before resuming the service.
@@ -125,3 +126,27 @@ journalctl -u tradebot -f     # watch logs live
 - Never commit `.env` or real keys. On the server, prefer systemd `Environment=`
   or a locked-down `.env` (`chmod 600 .env`).
 - First cloud run: watch `journalctl -u tradebot -f` for the first entry.
+
+### Preactivation review
+
+- The strategy retains the configured price ceiling (default $10), pre-pop
+  priority, momentum chase cap (+20% default), normal confirmation gates,
+  and opposite-direction weakest-score fallback after the first hour.
+  Pending second confirmations and unexamined budget-overflow candidates do
+  not count as rejected signals and cannot trigger the paradox fallback.
+- The weakest screen score is a heuristic, not a calibrated probability of
+  failure. Neither paradox selection nor historical winning days prove an edge.
+- TP/SL remain 30%/10% by default, anchored to confirmed entry fills. EOD
+  flatten starts one minute before exchange close; this is a submission time,
+  not a guarantee of liquidation before the bell.
+- Short direction survives saved-state recovery. Cancellation must be
+  confirmed before replacement; a fill racing cancellation blocks replacement.
+- Study results are simulated replays, not the actual account's daily P&L.
+  Replays omit live news/confirmation and do not reproduce the sandbox matching
+  engine. Fixed-date comparisons, earlier-win protection and bounded nudges
+  reduce some fitting risks but do not prevent overfitting. For the initial
+  monitored sessions, recommend explicitly setting `study_auto_improve` to
+  `false`; recording and reports remain available without promoting changes.
+- Local tests do not establish that the server receives depth fields. Observe
+  `liquidity_rejected`, `exit_liquidity_wait`, and `cancel_pending` logs before
+  judging profitability. Do not remove the price cap to force a fill.

@@ -85,6 +85,8 @@ WEBULL_STATUS_MAP = {
     "FILLED": OrderStatus.FILLED,
     "CANCELLED": OrderStatus.CANCELED,
     "CANCELED": OrderStatus.CANCELED,
+    "REJECTED": OrderStatus.CANCELED,
+    "EXPIRED": OrderStatus.CANCELED,
 }
 
 
@@ -601,6 +603,23 @@ class WebullSandboxBroker:
     def open_orders(self) -> list[PaperOrder]:
         """Locally tracked orders still open after the latest sync."""
         return [o for o in self._orders.values() if o.status is OrderStatus.OPEN]
+
+    def assert_no_remote_open_orders(self) -> None:
+        """Block startup rather than duplicate orders lost from the local cache."""
+        self._require_session()
+        response = self.session.trade_client.order_v3.get_order_open(
+            self._resolve_account_id(), page_size=100
+        )
+        if response.status_code != 200:
+            raise RuntimeError("Cannot verify server-side open orders; startup blocked")
+        records = response.json()
+        if not isinstance(records, list):
+            raise RuntimeError("Unexpected open-order response; startup blocked")
+        if records:
+            raise RuntimeError(
+                "Server-side working orders exist; startup blocked to prevent duplicates. "
+                "Resolve existing orders before restarting."
+            )
 
     def _require_session(self) -> None:
         if self.session is None:

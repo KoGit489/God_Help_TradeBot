@@ -37,6 +37,10 @@ class StateStore:
                 quantity=int(record["quantity"]),
                 target_price=Decimal(str(record["target_price"])),
                 stop_price=Decimal(str(record["stop_price"])),
+                direction=record.get(
+                    "direction",
+                    "short" if Decimal(str(record["target_price"])) < Decimal(str(record["stop_price"])) else "long",
+                ),
             )
             for symbol, record in plans.items()
             if isinstance(record, dict)
@@ -49,6 +53,7 @@ class StateStore:
                     "quantity": plan.quantity,
                     "target_price": str(plan.target_price),
                     "stop_price": str(plan.stop_price),
+                    "direction": plan.direction,
                 }
                 for symbol, plan in plans.items()
             }

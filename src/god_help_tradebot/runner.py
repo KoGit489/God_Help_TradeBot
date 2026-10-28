@@ -73,6 +73,7 @@ def run_bot(
     broker = WebullSandboxBroker.from_env().connect()
     if not broker.sandbox_mode or broker.live_mode:
         raise RuntimeError("run_bot is sandbox-only; live mode is not enabled")
+    broker.assert_no_remote_open_orders()
 
     loop = MonitorLoop(
         broker,

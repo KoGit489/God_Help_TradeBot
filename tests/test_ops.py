@@ -26,6 +26,20 @@ def test_state_store_missing_file_returns_empty(tmp_path) -> None:
     assert StateStore(tmp_path / "nope.json").load() == {}
 
 
+def test_state_store_preserves_short_direction(tmp_path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    store.save({"DOWN": ExitPlan("DOWN", 100, Decimal("2.10"), Decimal("3.30"), "short")})
+    assert store.load()["DOWN"].direction == "short"
+
+
+def test_state_store_infers_legacy_short_direction(tmp_path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"exit_plans": {"DOWN": {
+        "quantity": 100, "target_price": "2.10", "stop_price": "3.30",
+    }}}), encoding="utf-8")
+    assert StateStore(path).load()["DOWN"].direction == "short"
+
+
 def test_state_store_corrupt_file_returns_empty(tmp_path) -> None:
     path = tmp_path / "state.json"
     path.write_text("{ not json", encoding="utf-8")

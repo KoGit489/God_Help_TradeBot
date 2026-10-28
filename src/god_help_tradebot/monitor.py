@@ -611,13 +611,15 @@ class MonitorLoop:
 
         Returns (profiled_candidate, is_fallback) or None when nothing qualifies.
         """
+        awaiting_confirmation = False
         for profiled in self._ranked_profiles(snapshots):
             symbol = profiled.candidate.snapshot.symbol
             if self._confirm_budget_used >= self.config.max_confirmations_per_cycle:
                 summary.events.append(
                     LoopEvent("confirmation_budget", symbol, "deep-check budget spent; resumes next poll")
                 )
-                break
+                return None
+            previous_events = len(summary.events)
             if self._passes_confirmation(
                 symbol,
                 summary,
@@ -625,6 +627,12 @@ class MonitorLoop:
                 fast=profiled.profile == "prepop",
             ):
                 return profiled, False
+            awaiting_confirmation |= any(
+                event.kind == "confirmation_pending" for event in summary.events[previous_events:]
+            )
+
+        if awaiting_confirmation:
+            return None
 
         # Forced fallback: relax gates progressively and take the best-odds survivor.
         if not self.config.allow_fallback:
@@ -640,6 +648,8 @@ class MonitorLoop:
         it's RIGHT, and shorting it is a squeeze waiting to happen). Paradox
         longs stand down on a DOWN tape. Unknown/flat tape is allowed through.
         """
+        if not self.config.paradox_trend_guard:
+            return True
         if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
             return True
         from .patterns import trend_direction
@@ -815,7 +825,7 @@ class MonitorLoop:
                             LoopEvent("ghost_exit_canceled", symbol, "position already flat; canceled the stale exit order")
                         )
                     except Exception:
-                        pass
+                        raise
                 self._pending_exits.pop(symbol, None)
                 self.exit_plans.pop(symbol, None)
                 self._persist_plans()
@@ -962,24 +972,36 @@ class MonitorLoop:
 
     def _cancel_confirmed(self, order_id: int, symbol: str, summary: LoopSummary) -> bool:
         order = self._local_order(order_id)
-        self.broker.cancel_order(order_id)
         if isinstance(self.broker, WebullSandboxBroker):
-            if order is not None:
-                order.status = OrderStatus.OPEN
-            record = (
-                self.broker.get_order_status(order.client_order_id)
-                if order is not None and order.client_order_id else None
-            )
+            if order is None or not order.client_order_id:
+                raise RuntimeError(f"Cannot verify cancellation for {symbol}: missing tracked client order ID")
+            record = self.broker.get_order_status(order.client_order_id)
             status = str((record or {}).get("status", "")).upper()
-            if status not in ("CANCELED", "CANCELLED", "REJECTED", "EXPIRED"):
-                if order is not None:
+            if status not in ("FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED"):
+                try:
+                    self.broker.cancel_order(order_id)
+                finally:
                     order.status = OrderStatus.OPEN
+                record = self.broker.get_order_status(order.client_order_id)
+            status = str((record or {}).get("status", "")).upper()
+            if status == "FILLED":
+                order.status = OrderStatus.FILLED
+                price = (record or {}).get("filled_avg_price") or (record or {}).get("avg_price")
+                if price not in (None, ""):
+                    order.fill_price = Decimal(str(price))
+                summary.events.append(LoopEvent("cancel_raced_fill", symbol, "order filled during cancellation; replacement blocked"))
+                return False
+            if status not in ("CANCELED", "CANCELLED", "REJECTED", "EXPIRED"):
+                order.status = OrderStatus.OPEN
                 summary.events.append(
                     LoopEvent("cancel_pending", symbol, "server cancellation not confirmed; replacement blocked")
                 )
                 return False
-            if order is not None:
-                order.status = OrderStatus.CANCELED
+            order.status = OrderStatus.CANCELED
+        else:
+            canceled = self.broker.cancel_order(order_id)
+            if canceled is None or canceled.status is not OrderStatus.CANCELED:
+                return False
         return True
 
     def _chase_pending_limit_entry(self, summary: LoopSummary) -> None:
@@ -1054,7 +1076,11 @@ class MonitorLoop:
         # gate-passers (momentum/prepop/fade/loser) always go with the grain.
         paradox = is_fallback and self.config.paradox_fallback
         symbol = profiled.candidate.snapshot.symbol
-        go_short = profiled.profile in ("fade", "loser") or (paradox and profiled.profile == "fallback")
+        go_short = (
+            profiled.profile in ("fade", "loser")
+            or (paradox and profiled.profile == "fallback")
+            or (is_fallback and not paradox and profiled.profile == "fallback_loser")
+        )
         if go_short:
             if not self.allow_shorts:
                 if paradox and profiled.profile == "fallback":
