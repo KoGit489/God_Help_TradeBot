@@ -254,16 +254,30 @@ def test_load_bot_config_defaults_when_no_file(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     config = load_bot_config(tmp_path / "missing.json")
     assert config.risk_per_trade_usd == BotConfig().risk_per_trade_usd
+    assert config.min_symbol_price == 1.0
+    assert config.max_symbol_price == 20.0
 
 
 def test_load_bot_config_applies_json_overrides(tmp_path) -> None:
     path = tmp_path / "bot_config.json"
-    path.write_text(json.dumps({"risk_per_trade_usd": 50.0, "max_symbol_price": 5.0}), encoding="utf-8")
+    path.write_text(json.dumps({
+        "risk_per_trade_usd": 50.0,
+        "min_symbol_price": 1.5,
+        "max_symbol_price": 15.0,
+    }), encoding="utf-8")
 
     config = load_bot_config(path)
 
     assert config.risk_per_trade_usd == 50.0
-    assert config.max_symbol_price == 5.0
+    assert config.min_symbol_price == 1.5
+    assert config.max_symbol_price == 15.0
+
+
+def test_bot_config_rejects_price_max_below_minimum() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="max_symbol_price"):
+        BotConfig(min_symbol_price=1.0, max_symbol_price=0.99)
 
 
 def test_load_bot_config_env_overrides_file(tmp_path, monkeypatch) -> None:

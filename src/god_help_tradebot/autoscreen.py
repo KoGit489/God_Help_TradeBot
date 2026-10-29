@@ -171,7 +171,7 @@ def auto_screen_snapshots(
         snapshot = screener_row_to_snapshot(row)
         if snapshot is None:
             continue
-        if snapshot.price > config.max_symbol_price:
+        if not config.min_symbol_price <= snapshot.price <= config.max_symbol_price:
             continue
         # Pre-pop discovery keeps quiet movers; momentum needs the move up;
         # losers need the move down.

@@ -26,8 +26,8 @@ def build_trade_plan(
 ) -> TradePlan:
     entry = Decimal(str(entry_price))
     stop = Decimal(str(stop_price))
-    if entry <= 0 or stop <= 0:
-        raise ValueError("prices must be positive")
+    if entry < Decimal(str(config.min_symbol_price)) or stop <= 0:
+        raise ValueError("entry must meet the configured minimum price and prices must be positive")
     if stop >= entry:
         raise ValueError("stop_price must be below entry_price for a long trade")
     if entry > Decimal(str(config.max_symbol_price)):
@@ -68,8 +68,8 @@ def build_short_plan(
     """Short-side plan: stop sits ABOVE entry, target BELOW. Flipped long math."""
     entry = Decimal(str(entry_price))
     stop = Decimal(str(stop_price))
-    if entry <= 0 or stop <= 0:
-        raise ValueError("prices must be positive")
+    if entry < Decimal(str(config.min_symbol_price)) or stop <= 0:
+        raise ValueError("entry must meet the configured minimum price and prices must be positive")
     if stop <= entry:
         raise ValueError("stop_price must be above entry_price for a short trade")
     if entry > Decimal(str(config.max_symbol_price)):

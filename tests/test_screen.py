@@ -1,5 +1,10 @@
 from god_help_tradebot import BotConfig, MarketSnapshot, screen_candidates
-from god_help_tradebot.screen import explosive_score, screen_loser_candidates
+from god_help_tradebot.screen import (
+    explosive_score,
+    screen_fade_candidates,
+    screen_loser_candidates,
+    screen_prepop_candidates,
+)
 
 
 def snapshot(symbol: str, change: float, relative_volume: float, spread: float) -> MarketSnapshot:
@@ -94,11 +99,38 @@ def test_loser_profile_ranks_most_explosive_slide_first() -> None:
 
 
 def test_explosive_but_disqualified_still_gets_filtered() -> None:
-    # Same pricing requirements: a $15 stock is over max_symbol_price no matter
+    # Same pricing requirements: a $21 stock is over max_symbol_price no matter
     # how explosive it looks.
-    too_expensive = _explosive_snap("RICH", change=30, rvol=20, range_position=0.95, price=15.00)
+    too_expensive = _explosive_snap("RICH", change=30, rvol=20, range_position=0.95, price=21.00)
 
     assert screen_candidates([too_expensive], BotConfig()) == []
+
+
+def test_price_range_is_inclusive_one_to_twenty_for_all_profiles() -> None:
+    config = BotConfig(allow_shorts=True)
+    cases = (
+        (screen_candidates, 5, 5, 0.5),
+        (screen_prepop_candidates, 1, 5, 0.4),
+        (screen_fade_candidates, 15, 8, 0.2),
+        (screen_loser_candidates, -5, 5, 0.2),
+    )
+    for profile, change, rvol, position in cases:
+        for price in (1.0, 20.0):
+            eligible = _explosive_snap("BOUNDARY", change, rvol, position, price)
+            assert [item.snapshot.symbol for item in profile([eligible], config)] == ["BOUNDARY"]
+        for price in (0.99, 20.01):
+            ineligible = _explosive_snap("OUTSIDE", change, rvol, position, price)
+            assert profile([ineligible], config) == []
+
+
+def test_exact_price_boundaries_are_eligible() -> None:
+    config = BotConfig()
+    one_dollar = _explosive_snap("ONE", change=5, rvol=5, range_position=0.5, price=1.0)
+    twenty_dollars = _explosive_snap("TWENTY", change=5, rvol=5, range_position=0.5, price=20.0)
+
+    assert [item.snapshot.symbol for item in screen_candidates([one_dollar, twenty_dollars], config)] == [
+        "ONE", "TWENTY"
+    ]
 
 
 def test_momentum_chase_cap_rejects_extended_movers() -> None:

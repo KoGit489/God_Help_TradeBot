@@ -20,4 +20,4 @@ def test_trade_plan_rejects_invalid_stop() -> None:
 
 def test_trade_plan_rejects_price_above_limit() -> None:
     with pytest.raises(ValueError, match="price limit"):
-        build_trade_plan(10.01, 9.90, BotConfig())
+        build_trade_plan(20.01, 19.90, BotConfig())

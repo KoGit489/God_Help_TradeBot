@@ -5,7 +5,8 @@ from dataclasses import dataclass
 class BotConfig:
     """Explicit guardrails for a single planned trade."""
 
-    max_symbol_price: float = 10.0
+    min_symbol_price: float = 1.0
+    max_symbol_price: float = 20.0
     risk_per_trade_usd: float = 25.0
     reward_multiple: float = 3.0
     max_position_value_usd: float = 500.0
@@ -65,8 +66,10 @@ class BotConfig:
     study_auto_improve: bool = True
 
     def __post_init__(self) -> None:
-        if self.max_symbol_price <= 0:
-            raise ValueError("max_symbol_price must be positive")
+        if self.min_symbol_price <= 0:
+            raise ValueError("min_symbol_price must be positive")
+        if self.max_symbol_price < self.min_symbol_price:
+            raise ValueError("max_symbol_price must be >= min_symbol_price")
         if self.risk_per_trade_usd <= 0:
             raise ValueError("risk_per_trade_usd must be positive")
         if self.reward_multiple < 1:

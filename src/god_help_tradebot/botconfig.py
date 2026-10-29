@@ -17,6 +17,7 @@ DEFAULT_CONFIG_FILE = Path("bot_config.json")
 
 # Keys in the JSON file that map onto BotConfig fields.
 _TUNABLES = {
+    "min_symbol_price": float,
     "max_symbol_price": float,
     "risk_per_trade_usd": float,
     "reward_multiple": float,

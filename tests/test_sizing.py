@@ -56,3 +56,15 @@ def test_pct_mode_still_enforces_symbol_price_limit() -> None:
         raise AssertionError("should enforce max_symbol_price")
     except ValueError:
         pass
+
+
+def test_long_and_short_trade_plans_enforce_minimum_symbol_price() -> None:
+    from god_help_tradebot.risk import build_short_plan
+
+    config = BotConfig(allow_shorts=True)
+    for build, entry, stop in ((build_trade_plan, 0.99, 0.90), (build_short_plan, 0.99, 1.10)):
+        try:
+            build(entry, stop, config)
+            raise AssertionError("should enforce minimum symbol price")
+        except ValueError as exc:
+            assert "minimum" in str(exc)

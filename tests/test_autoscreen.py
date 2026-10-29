@@ -122,13 +122,14 @@ def test_enrich_with_quotes_drops_symbols_without_quotes() -> None:
 
 def test_auto_screen_filters_price_and_change_before_enrichment() -> None:
     rows = [
-        _row("TOOEXPENSIVE", 15.00, 1.0, 500_000, 2.5, 14.0, 16.0),
+        _row("TOOEXPENSIVE", 20.01, 1.0, 500_000, 2.5, 19.0, 21.0),
+        _row("TOOCHEAP", 0.99, 1.0, 500_000, 2.5, 0.90, 1.05),
         _row("TOOLITTLEMOVE", 2.00, 0.01, 500_000, 2.5, 1.90, 2.10),
         _row("GOW", 3.18, 0.10, 500_000, 2.5, 2.80, 3.40),
     ]
     quote = Quote("GOW", Decimal("3.10"), Decimal("3.12"), Decimal("3.11"))
     broker = _broker(rows, {"GOW": quote})
-    config = BotConfig(max_symbol_price=10.0, min_change_percent=2.0)
+    config = BotConfig(min_change_percent=2.0)
 
     snapshots = auto_screen_snapshots(broker, config)
 

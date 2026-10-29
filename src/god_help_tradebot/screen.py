@@ -56,7 +56,7 @@ def screen_candidates(
 def _passes_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
     return (
         bool(snapshot.symbol.strip())
-        and 0 < snapshot.price <= config.max_symbol_price
+        and config.min_symbol_price <= snapshot.price <= config.max_symbol_price
         # Coil-not-spike: anything already up more than momentum_max_change_percent
         # is too late to buy — we want the move BEFORE it happens.
         and config.min_change_percent <= snapshot.change_percent <= config.momentum_max_change_percent
@@ -118,7 +118,7 @@ def screen_prepop_candidates(
 def _passes_prepop_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
     return (
         bool(snapshot.symbol.strip())
-        and 0 < snapshot.price <= config.max_symbol_price
+        and config.min_symbol_price <= snapshot.price <= config.max_symbol_price
         and PREPOP_MIN_CHANGE_PERCENT <= snapshot.change_percent <= PREPOP_MAX_CHANGE_PERCENT
         and snapshot.volume >= config.min_average_volume
         and snapshot.relative_volume >= PREPOP_MIN_RELATIVE_VOLUME
@@ -181,7 +181,7 @@ def screen_fade_candidates(
 def _passes_fade_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
     return (
         bool(snapshot.symbol.strip())
-        and 0 < snapshot.price <= config.max_symbol_price
+        and config.min_symbol_price <= snapshot.price <= config.max_symbol_price
         and snapshot.change_percent >= FADE_MIN_CHANGE_PERCENT
         and snapshot.volume >= config.min_average_volume
         and 0 < snapshot.bid <= snapshot.ask
@@ -218,7 +218,7 @@ def screen_loser_candidates(
 def _passes_loser_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
     return (
         bool(snapshot.symbol.strip())
-        and 0 < snapshot.price <= config.max_symbol_price
+        and config.min_symbol_price <= snapshot.price <= config.max_symbol_price
         and snapshot.change_percent <= -config.min_change_percent
         and -config.max_change_percent <= snapshot.change_percent
         and snapshot.volume >= config.min_average_volume
