@@ -99,8 +99,11 @@ journalctl -u tradebot -f     # watch logs live
   liquidity. `cancel_pending` means replacement is blocked awaiting server
   confirmation. Neither event means the position is flat.
 - Entry cutoff (one minute before close) and CORE market close are separate.
-  Exits use CORE until the actual close, pause in unsupported hours, and may
-  retry in NIGHT if the symbol supports it. A fatal loop halt exits nonzero
+  All monitor entries, take-profits, stops, flatten orders, and exit retries
+  use MARKET/CORE. They pause outside regular hours; no NIGHT limit-order
+  fallback is submitted. An unfinished EOD liquidation request persists and
+  resumes at the next regular open, including after a restart. Missing
+  liquidity can still leave overnight exposure. A fatal loop halt exits nonzero
   so the unit's `Restart=on-failure` policy can act; this does not guarantee
   execution. Startup now queries server-side open orders and refuses to start
   if any exist or their response cannot be verified. Resolve those orders
@@ -129,7 +132,7 @@ journalctl -u tradebot -f     # watch logs live
 
 ### Preactivation review
 
-- The strategy retains the configured price ceiling (default $10), pre-pop
+- The strategy retains the configured $1-$20 default price interval, pre-pop
   priority, momentum chase cap (+20% default), normal confirmation gates,
   and opposite-direction weakest-score fallback after the first hour.
   Pending second confirmations and unexamined budget-overflow candidates do
@@ -150,3 +153,30 @@ journalctl -u tradebot -f     # watch logs live
 - Local tests do not establish that the server receives depth fields. Observe
   `liquidity_rejected`, `exit_liquidity_wait`, and `cancel_pending` logs before
   judging profitability. Do not remove the price cap to force a fill.
+
+### Market-only execution and scan capacity
+
+- The monitor submits market orders rather than patient limit entries. Market
+  orders cross the spread and may slip or remain unfilled when executable
+  depth is absent. Existing spread, depth, sizing and direction gates remain.
+  The broker and paper simulator still support other order types for isolated
+  API testing, but the running strategy does not submit them.
+- Legacy `entry_limit_spread_fraction` and `entry_chase_polls` settings are
+  accepted for configuration compatibility but do not alter market-only entries.
+- SDK 3.0.2 documents 200 non-paginated rows per screener ranking. Discovery
+  now uses daily/3-minute/5-minute gainers and losers plus relative-volume,
+  volume, turnover, turnover-rate and amplitude activity lists. With shorts
+  enabled, that is up to 2,200 raw rows, not 2,200 guaranteed unique stocks.
+  `screener_list_limit` defaults to 200; an existing lower override still applies.
+- Symbols are deduplicated and price-filtered before quote enrichment. A pass
+  quotes up to 1,200 symbols in 12 batches of 100; the offset rotates through
+  larger eligible pools. Discovery refreshes no more often than every 30
+  seconds. At that cadence, discovery uses at most 24 snapshot calls/minute,
+  leaving headroom below the published sandbox 30/minute limit for entry and
+  exit checks. Other clients sharing the app key consume the same quota.
+- `[scan_summary]` reports observed unique, price-eligible and quote-enriched
+  counts. Actual coverage depends on API responses, entitlements, overlap and
+  failed batches. The confirmation budget remains five per cycle by default.
+  This is a bounded scan expansion, not a measured hardware maximum or a
+  claim to scan every US listing. Follow live counts and 429s before raising
+  resource use further.

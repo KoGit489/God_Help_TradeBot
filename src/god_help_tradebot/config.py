@@ -36,8 +36,8 @@ class BotConfig:
     require_double_confirmation: bool = True
     # Coil-not-spike: momentum entries already up more than this are too late.
     momentum_max_change_percent: float = 20.0
-    # Patient entries: rest a limit this fraction inside the spread instead of
-    # paying the full ask; chase at market after this many polls if unfilled.
+    # Legacy entry settings retained for config compatibility; market-only
+    # execution no longer uses a limit price or entry chase delay.
     entry_limit_spread_fraction: float = 0.25
     entry_chase_polls: int = 2
     # Exit watchdog: an unfilled exit order is chased aggressively after this
@@ -55,9 +55,9 @@ class BotConfig:
     # Paradox tape guard: never fade a read the tape is actively confirming —
     # paradox shorts stand down on an up tape, paradox longs on a down tape.
     paradox_trend_guard: bool = True
-    # Wide-net mode: rows pulled per screener list, and the max deep
-    # confirmations per poll cycle (protects the news quota on wide nets).
-    screener_list_limit: int = 100
+    # Rows used from each non-paginated ranking (API maximum 200), and
+    # maximum deep confirmations per poll cycle.
+    screener_list_limit: int = 200
     max_confirmations_per_cycle: int = 5
     # Self-study cadence: every N recorded trading days, grade the strategy and
     # target at least this many winning days in the window.
@@ -96,8 +96,8 @@ class BotConfig:
             raise ValueError("exit_chase_polls must be at least 1")
         if self.fallback_after_minutes < 0:
             raise ValueError("fallback_after_minutes cannot be negative")
-        if self.screener_list_limit < 1:
-            raise ValueError("screener_list_limit must be at least 1")
+        if not 1 <= self.screener_list_limit <= 200:
+            raise ValueError("screener_list_limit must be between 1 and the API maximum of 200")
         if self.max_confirmations_per_cycle < 1:
             raise ValueError("max_confirmations_per_cycle must be at least 1")
         if not 0.0 < self.stop_pct < 1.0:

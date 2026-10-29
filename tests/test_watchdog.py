@@ -161,7 +161,7 @@ def test_startup_alarm_fires_once_for_carried_positions() -> None:
     assert "WARNING" in alarms[0].detail
 
 
-def test_night_flatten_rests_a_limit_not_a_market() -> None:
+def test_night_flatten_defers_without_submitting_orders() -> None:
     broker = PaperBroker(10_000)
     broker.positions["GOW"] = Position(quantity=100, average_price=Decimal("2.50"))
     broker.last_quotes["GOW"] = _quote("GOW", "2.40", "2.42")
@@ -175,9 +175,9 @@ def test_night_flatten_rests_a_limit_not_a_market() -> None:
 
     summary = loop.run_once()
 
-    assert summary.exits[0].order_type is OrderType.LIMIT
-    assert summary.exits[0].limit_price == Decimal("2.40")  # aggressive at the bid
-    assert any(e.kind == "eod_flatten" for e in summary.events)
+    assert not summary.exits
+    assert "GOW" in loop.exit_plans
+    assert not any(e.kind == "error" for e in summary.events)
 
 
 def test_359_flatten_uses_core_session_order() -> None:
@@ -196,6 +196,20 @@ def test_359_flatten_uses_core_session_order() -> None:
 
     assert summary.exits[0].order_type is OrderType.MARKET
     assert any(e.kind == "eod_flatten" and "market-exit" in e.detail for e in summary.events)
+
+
+def test_market_only_exits_defer_overnight() -> None:
+    broker = PaperBroker(10_000)
+    broker.positions["GOW"] = Position(100, Decimal("2.50"))
+    broker.last_quotes["GOW"] = _quote("GOW", "2.20", "2.21")
+    loop = MonitorLoop(
+        broker, exit_plans={"GOW": ExitPlan("GOW", 100, Decimal("3.25"), Decimal("2.25"))},
+        now_provider=lambda: datetime(2026, 10, 7, 20, 30, tzinfo=EASTERN),
+    )
+    result = loop.run_once()
+    assert not result.exits
+    assert "GOW" in loop.exit_plans
+    assert not any(event.kind == "error" for event in result.events)
 
 
 def test_flatten_waits_during_the_4_to_8_pm_dead_zone() -> None:
@@ -277,7 +291,7 @@ def test_deterministic_flatten_rejection_does_not_halt_loop() -> None:
     assert "GOW" in loop._exit_blocked
 
 
-def test_canceled_core_flatten_is_retried_during_night_session() -> None:
+def test_canceled_core_flatten_keeps_plan_without_night_orders() -> None:
     broker = PaperBroker(10_000)
     broker.positions["GOW"] = Position(quantity=100, average_price=Decimal("2.50"))
     broker.last_quotes["GOW"] = _quote("GOW", "2.40", "2.42")
@@ -299,8 +313,9 @@ def test_canceled_core_flatten_is_retried_during_night_session() -> None:
     state["now"] = datetime(2026, 10, 7, 20, 30, tzinfo=EASTERN)
     summary = loop.run_once()
 
-    assert summary.exits[-1].order_type is OrderType.LIMIT
-    assert any(e.kind == "eod_flatten" and "night session" in e.detail for e in summary.events)
+    assert not summary.exits
+    assert "GOW" in loop.exit_plans
+    assert not any(e.kind == "error" for e in summary.events)
 
 
 def test_flatten_plan_persists_until_position_is_confirmed_flat(tmp_path) -> None:
@@ -324,3 +339,25 @@ def test_flatten_plan_persists_until_position_is_confirmed_flat(tmp_path) -> Non
     loop.run_once()  # fill reconciled, position now flat
 
     assert store.load() == {}
+
+
+def test_unfinished_flatten_retries_next_open_after_restart(tmp_path) -> None:
+    broker = PaperBroker(10_000)
+    broker.positions["GOW"] = Position(100, Decimal("2.50"))
+    broker.last_quotes["GOW"] = _quote("GOW", "2.40", "2.42")
+    store = StateStore(tmp_path / "bot_state.json")
+    evening = MonitorLoop(
+        broker, state_store=store,
+        exit_plans={"GOW": ExitPlan("GOW", 100, Decimal("3.25"), Decimal("2.25"))},
+        now_provider=lambda: datetime(2026, 10, 7, 20, 30, tzinfo=EASTERN),
+    )
+    assert not evening.run_once().exits
+    assert store.load()["GOW"].liquidation_requested
+
+    morning = MonitorLoop(
+        broker, state_store=store,
+        now_provider=lambda: datetime(2026, 10, 8, 9, 30, tzinfo=EASTERN),
+    )
+    result = morning.run_once()
+    assert len(result.exits) == 1
+    assert result.exits[0].order_type is OrderType.MARKET

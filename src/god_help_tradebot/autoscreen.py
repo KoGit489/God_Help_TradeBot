@@ -7,6 +7,8 @@ strategy screener can evaluate spread and liquidity. No trading action is taken 
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .broker import WebullSandboxBroker, US_STOCK_CATEGORY
@@ -19,6 +21,19 @@ GAINER_SORT = "CHANGE_RATIO"
 DESCENDING = "DESC"
 ASCENDING = "ASC"
 MOST_ACTIVE_RANK_TYPE = "RELATIVE_VOLUME_10D"
+SCREENER_MAX_ROWS = 200
+DISCOVERY_REFRESH_SECONDS = 30
+DISCOVERY_QUOTE_BATCHES = 12
+MOVER_RANKS = ("DAY_1", "MIN_3", "MIN_5")
+ACTIVITY_RANKS = ("RELATIVE_VOLUME_10D", "VOLUME", "TURNOVER", "TURNOVER_RATE", "AMPLITUDE")
+
+
+@dataclass
+class DiscoveryResult:
+    snapshots: list[MarketSnapshot]
+    unique_symbols: int
+    eligible_symbols: int
+    next_offset: int
 
 
 def _decimal_or_zero(value: Any) -> float:
@@ -62,10 +77,10 @@ PREPOP_MIN_CHANGE = -2.0
 PREPOP_MAX_CHANGE = 4.0
 
 
-def fetch_top_gainers(broker: WebullSandboxBroker, limit: int = 50) -> list[dict[str, Any]]:
+def fetch_top_gainers(broker: WebullSandboxBroker, limit: int = SCREENER_MAX_ROWS, *, rank_type: str = GAINER_RANK_TYPE) -> list[dict[str, Any]]:
     """Fetch the top gainers list from the broker's data client."""
     response = broker.session.data_client.screener.list_gainers_losers(
-        rank_type=GAINER_RANK_TYPE,
+        rank_type=rank_type,
         category=US_STOCK_CATEGORY,
         sort_by=GAINER_SORT,
         direction=DESCENDING,
@@ -77,12 +92,12 @@ def fetch_top_gainers(broker: WebullSandboxBroker, limit: int = 50) -> list[dict
     return [row for row in rows[:limit] if isinstance(row, dict)]
 
 
-def fetch_most_active(broker: WebullSandboxBroker, limit: int = 50) -> list[dict[str, Any]]:
+def fetch_most_active(broker: WebullSandboxBroker, limit: int = SCREENER_MAX_ROWS, *, rank_type: str = MOST_ACTIVE_RANK_TYPE) -> list[dict[str, Any]]:
     """Fetch the most-active list ranked by 10-day relative volume (pre-pop hunting)."""
     response = broker.session.data_client.screener.list_most_active(
         category=US_STOCK_CATEGORY,
-        rank_type=MOST_ACTIVE_RANK_TYPE,
-        sort_by="RELATIVE_VOLUME_10D",
+        rank_type=rank_type,
+        sort_by="TURNOVER" if rank_type == "TURNOVER_RATE" else rank_type,
         direction=DESCENDING,
     )
     payload = response.json()
@@ -92,10 +107,10 @@ def fetch_most_active(broker: WebullSandboxBroker, limit: int = 50) -> list[dict
     return [row for row in rows[:limit] if isinstance(row, dict)]
 
 
-def fetch_top_losers(broker: WebullSandboxBroker, limit: int = 50) -> list[dict[str, Any]]:
+def fetch_top_losers(broker: WebullSandboxBroker, limit: int = SCREENER_MAX_ROWS, *, rank_type: str = GAINER_RANK_TYPE) -> list[dict[str, Any]]:
     """Fetch the top losers list from the broker's data client (bearish hunting)."""
     response = broker.session.data_client.screener.list_gainers_losers(
-        rank_type=GAINER_RANK_TYPE,
+        rank_type=rank_type,
         category=US_STOCK_CATEGORY,
         sort_by=GAINER_SORT,
         direction=ASCENDING,
@@ -185,6 +200,45 @@ def auto_screen_snapshots(
             continue
         snapshots.append(snapshot)
     return enrich_with_quotes(broker, snapshots)
+
+
+def discover_market_snapshots(
+    broker: WebullSandboxBroker,
+    config: BotConfig,
+    *,
+    allow_shorts: bool,
+    quote_offset: int = 0,
+) -> DiscoveryResult:
+    """Union supported rankings and rotate bounded quote batches after deduplication."""
+    sources = [(fetch_top_gainers, rank) for rank in MOVER_RANKS]
+    if allow_shorts:
+        sources.extend((fetch_top_losers, rank) for rank in MOVER_RANKS)
+    sources.extend((fetch_most_active, rank) for rank in ACTIVITY_RANKS)
+    seen: dict[str, MarketSnapshot] = {}
+    for fetch, rank in sources:
+        try:
+            rows = fetch(broker, limit=config.screener_list_limit, rank_type=rank)
+        except Exception as exc:
+            logging.getLogger("god_help_tradebot").warning(
+                "[scan_source_error] %s %s: %s", fetch.__name__, rank, type(exc).__name__
+            )
+            continue
+        for row in rows:
+            snapshot = screener_row_to_snapshot(row)
+            if snapshot is not None:
+                seen.setdefault(snapshot.symbol, snapshot)
+    eligible = sorted(
+        (snapshot for snapshot in seen.values()
+         if config.min_symbol_price <= snapshot.price <= config.max_symbol_price),
+        key=lambda snapshot: snapshot.symbol,
+    )
+    if not eligible:
+        return DiscoveryResult([], len(seen), 0, 0)
+    offset = quote_offset % len(eligible)
+    rotated = eligible[offset:] + eligible[:offset]
+    selected = rotated[:DISCOVERY_QUOTE_BATCHES * 100]
+    snapshots = enrich_with_quotes(broker, selected)
+    return DiscoveryResult(snapshots, len(seen), len(eligible), (offset + len(selected)) % len(eligible))
 
 
 __all__ = [

@@ -41,6 +41,7 @@ class StateStore:
                     "direction",
                     "short" if Decimal(str(record["target_price"])) < Decimal(str(record["stop_price"])) else "long",
                 ),
+                liquidation_requested=bool(record.get("liquidation_requested", False)),
             )
             for symbol, record in plans.items()
             if isinstance(record, dict)
@@ -54,6 +55,7 @@ class StateStore:
                     "target_price": str(plan.target_price),
                     "stop_price": str(plan.stop_price),
                     "direction": plan.direction,
+                    "liquidation_requested": plan.liquidation_requested,
                 }
                 for symbol, plan in plans.items()
             }

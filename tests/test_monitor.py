@@ -60,7 +60,7 @@ def test_monitor_exits_at_target_price() -> None:
 
     summary = loop.run_once()
 
-    assert summary.exits[0].order_type is OrderType.LIMIT
+    assert summary.exits[0].order_type is OrderType.MARKET
     assert summary.exits[0].status is OrderStatus.OPEN
     assert summary.events[0].kind == "take_profit_order"
 

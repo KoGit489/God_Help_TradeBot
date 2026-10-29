@@ -56,7 +56,7 @@ def _always_pass(symbol: str) -> SimpleNamespace:
 # --- Patient limit entries ---------------------------------------------------
 
 
-def test_entry_rests_a_patient_limit_inside_the_spread() -> None:
+def test_entry_submits_market_order_without_limit_price() -> None:
     broker = _broker_with_quote()
     loop = MonitorLoop(
         broker,
@@ -69,13 +69,12 @@ def test_entry_rests_a_patient_limit_inside_the_spread() -> None:
     summary = loop.run_once()
 
     entry = summary.entries[0]
-    assert entry.order_type is OrderType.LIMIT
-    # Bid 2.99 + 25% of the 2-cent spread = 2.995 — we no longer pay the ask.
-    assert entry.limit_price == Decimal("2.995")
-    assert entry.status.value == "OPEN"  # resting patiently, not chasing
+    assert entry.order_type is OrderType.MARKET
+    assert entry.limit_price is None
+    assert entry.status.value == "OPEN"
 
 
-def test_unfilled_limit_is_chased_at_market() -> None:
+def test_unfilled_market_entry_is_not_duplicated() -> None:
     broker = _broker_with_quote()
     loop = MonitorLoop(
         broker,
@@ -85,13 +84,15 @@ def test_unfilled_limit_is_chased_at_market() -> None:
         flatten_before_close=False,
     )
 
-    summary = loop.run_once()  # submits the patient limit
-    summary = loop.run_once(summary)  # waits (poll 1 of 2)
+    summary = loop.run_once()
+    summary = loop.run_once(summary)
     assert not any(e.kind == "entry_chase" for e in summary.events)
 
-    summary = loop.run_once(summary)  # patience over — chase at market
+    summary = loop.run_once(summary)
 
-    assert any(e.kind == "entry_chase" for e in summary.events)
+    assert not any(e.kind == "entry_chase" for e in summary.events)
+    assert any(e.kind == "entry_wait" for e in summary.events)
+    assert len(summary.entries) == 1
     assert summary.entries[-1].order_type is OrderType.MARKET
 
 
