@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-file", default="bot_config.json", help="Path to bot_config.json overrides")
     parser.add_argument("--state-file", default="bot_state.json", help="Path to persisted exit plans")
     parser.add_argument("--options-state-file", default="spy_options_state.json", help="Path to persisted SPY option trade state")
+    parser.add_argument("--options-performance-file", default="spy_options_performance.json", help="Path to persistent SPY budget and review history")
     parser.add_argument("--log-file", default="bot.log", help="Path to the rotating log file")
     parser.add_argument("--backtest", metavar="TIMELINE.json", help="Replay a JSON timeline instead of live trading")
     parser.add_argument("--backtest-cash", type=float, default=100_000, help="Starting cash for backtests")
@@ -68,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         min_confirmation_score=args.min_confirmation,
         state_file=args.state_file,
         options_state_file=args.options_state_file,
+        options_performance_file=args.options_performance_file,
         log_file=args.log_file,
     )
     return 0

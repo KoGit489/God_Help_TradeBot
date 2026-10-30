@@ -7,9 +7,11 @@ Sandbox-only Webull API bot. The default Prototype strategy is **SPY 0DTE long o
 - Starts monitoring SPY at 9:25 AM ET; option entries are only attempted during CORE market hours.
 - Uses SPY 5-minute chart patterns/trend, ticker and broad-market news, flow/analyst signals when available, and option Greeks for contract validation.
 - Strong directional consensus buys with the signal (bullish = call, bearish = put). Moderate directional consensus is inverted per the configured rule. Neutral, conflicting, stale, illiquid, or incomplete data means no trade.
-- Selects the highest-ask same-day SPY call/put with premium no greater than $1.00 per share ($100 per standard 100-share contract), positive two-sided option depth, acceptable spread, and valid Greeks.
-- Paper contract quantity is bounded by sandbox buying power, visible ask size, and the per-order contract cap. Market orders can still slip, partially fill, or remain unfilled.
-- Tracks one entry per day. Take-profit is +30%, stop-loss is -10% from confirmed average fill, and the bot submits a market exit at 3:59 PM ET. The simulator may not fill an exit without bid liquidity; the state file and logs preserve that unresolved status.
+- Seeds a persistent options budget from `spy_option_initial_budget_usd` (default $100). After each closed trade, realized option P&L compounds that budget; the next contract's ask premium (`ask x 100`) must fit the current budget. The most expensive qualifying contract is selected, and quantity uses the maximum affordable amount, capped by current sandbox buying power, visible ask size, and the configured order limit.
+- Qualifies same-day SPY calls/puts using fresh two-sided quotes, spread, visible depth, volume tie-breaks, and valid Greeks. Market orders can still slip, partially fill, or remain unfilled.
+- Tracks one entry per session. Take-profit is +30% and stop-loss is -10% of the confirmed option premium fill, evaluated against the option's bid. The bot submits a market exit at 3:59 PM ET. The simulator may not fill an exit without bid liquidity; the state file and logs preserve that unresolved status.
+- After each five completed trades, reviews the latest five. Fewer than four wins tightens signal and spread gates one step; gates never auto-relax. If all tightening limits are reached and the target is still missed, new entries pause for manual review. The ledger persists across restarts and dates in `spy_options_performance.json`.
+- This review is a conservative filter, not evidence that future results will improve. It does not replay option data, account for fees, or guarantee effectiveness over weeks, months, or years. Back up the performance ledger and supervise the paper account.
 - The previous equity strategy is available only with `strategy_mode: "equity"`; its backtest/self-study is not an options backtest and is not run in SPY options mode.
 
 This is experimental software, not investment advice or a guarantee of profit. 0DTE options can lose the entire premium rapidly. Test only in the sandbox and supervise every session.
@@ -30,8 +32,8 @@ Useful SPY controls in `bot_config.json`:
 ```json
 {
   "strategy_mode": "spy_0dte_options",
-  "spy_option_contract_budget_usd": 100.0,
-  "spy_option_buying_power_fraction": 0.98,
+  "spy_option_initial_budget_usd": 100.0,
+  "spy_option_buying_power_fraction": 1.0,
   "spy_option_max_spread_percent": 20.0,
   "spy_option_strong_score": 0.70,
   "spy_option_weak_floor": 0.55

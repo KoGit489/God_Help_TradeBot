@@ -50,7 +50,7 @@ _TUNABLES = {
     "study_interval_days": int,
     "study_target_winning_days": int,
     "study_auto_improve": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
-    "spy_option_contract_budget_usd": float,
+    "spy_option_initial_budget_usd": float,
     "spy_option_buying_power_fraction": float,
     "spy_option_max_spread_percent": float,
     "spy_option_min_abs_delta": float,
@@ -78,10 +78,21 @@ def load_bot_config(path: str | Path = DEFAULT_CONFIG_FILE) -> BotConfig:
                 for key, caster in _TUNABLES.items():
                     if key in data:
                         overrides[key] = caster(data[key])
+                if "spy_option_contract_budget_usd" in data:
+                    overrides.setdefault(
+                        "spy_option_initial_budget_usd",
+                        float(data["spy_option_contract_budget_usd"]),
+                    )
         except (json.JSONDecodeError, OSError, ValueError, TypeError):
             pass  # A malformed file falls back to defaults rather than crashing
 
     # Environment variables override the file (BOT_MAX_SYMBOL_PRICE=5, etc.).
+    legacy_budget = os.environ.get("BOT_SPY_OPTION_CONTRACT_BUDGET_USD")
+    if legacy_budget is not None and "BOT_SPY_OPTION_INITIAL_BUDGET_USD" not in os.environ:
+        try:
+            overrides["spy_option_initial_budget_usd"] = float(legacy_budget)
+        except ValueError:
+            pass
     for key, caster in _TUNABLES.items():
         env_value = os.environ.get(f"BOT_{key.upper()}")
         if env_value is not None:

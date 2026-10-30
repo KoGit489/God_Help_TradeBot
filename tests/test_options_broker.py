@@ -81,3 +81,17 @@ def test_remote_open_order_interlock_allows_only_persisted_recovery_order():
 
     with pytest.raises(RuntimeError, match="startup blocked"):
         broker.assert_no_remote_open_orders(allowed_client_order_ids={"another-order"})
+
+
+def test_buying_power_does_not_fall_back_to_net_liquidation_value():
+    broker = _broker()
+    payload = {"account_currency_assets": [{"buying_power": "0", "cash_balance": "50", "net_liquidation_value": "500"}]}
+    broker.session.trade_client.account_v2 = SimpleNamespace(
+        get_account_balance=lambda account_id: SimpleNamespace(json=lambda: payload)
+    )
+
+    assert broker.get_buying_power() == Decimal("0")
+
+    payload["account_currency_assets"][0].pop("buying_power")
+    payload["account_currency_assets"][0].pop("cash_balance")
+    assert broker.get_buying_power() is None

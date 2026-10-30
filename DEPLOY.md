@@ -87,30 +87,73 @@ systemctl enable --now tradebot
 journalctl -u tradebot -f     # watch logs live
 ```
 
+## Updating Prototype
+
+Keep the options performance ledger and daily recovery state in the server's
+working directory. Back them up before updating; do not delete them during a
+code update.
+
+```bash
+set -e
+cd /root/God_Help_TradeBot
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Server worktree is dirty; preserve/reconcile local changes before updating."
+  exit 1
+fi
+systemctl stop tradebot
+backup_dir="/root/tradebot-backups/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup_dir"
+for file in spy_options_state.json spy_options_performance.json; do
+  if [ -f "$file" ]; then cp -a "$file" "$backup_dir/"; fi
+done
+git fetch origin
+git switch Prototype
+git pull --ff-only origin Prototype
+source .venv/bin/activate
+pip install .
+systemctl restart tradebot
+systemctl status --no-pager tradebot
+journalctl -u tradebot -n 100 --no-pager
+```
+
+The command stops if the server worktree is dirty. Backups are stored outside
+the repository under `/root/tradebot-backups/`. Keep
+`spy_options_performance.json` to retain compounded equity and review history.
+`spy_options_state.json` is separate same-session order recovery state; only
+archive it after confirming the sandbox has no positions or open orders.
+
 ## Safety notes
 
 - Default strategy is `spy_0dte_options`; use `strategy_mode="equity"` only to
   explicitly run the legacy equity strategy. Do not start options mode until
   the sandbox account is reset/flat and has no working orders.
-- The SPY paper strategy monitors from 9:25 AM ET, buys only same-day SPY
-  contracts during CORE hours, and uses MARKET orders. A contract's quoted ask
-  must be <= $1.00/share ($100 standard contract premium). Paper quantity is
-  bounded by available buying power, visible ask size, and
-  `spy_option_max_contracts_per_order`; market slippage can still exceed the
-  quoted premium cap.
+- The SPY paper strategy monitors from 9:25 AM ET, buys same-day SPY contracts
+  during CORE hours, and uses MARKET orders. The default $100 starting strategy
+  budget compounds by realized option P&L. Contract premium is `ask x 100` and
+  must fit the current budget; quantity is maximized within strategy equity,
+  buying power, visible ask size, and `spy_option_max_contracts_per_order`.
+  Market slippage can exceed the observed ask and budget.
 - Strong/weak signal thresholds and the low-conviction inverse rule are
   configurable. Signals combine existing SPY chart/flow/analyst/ticker-news
   data with broad market news; Greeks validate contract exposure/liquidity,
   they do not predict direction. Missing required inputs means no trade.
-- One entry attempt per session. TP/SL are +30%/-10% from confirmed option
-  fill. A market exit is submitted at 3:59 PM ET. Zero bid depth can leave a
+- One entry attempt per session. TP/SL are +30%/-10% of the confirmed option
+  premium fill and are triggered using the option bid. A market exit is
+  submitted at 3:59 PM ET. Zero bid depth can leave a
   0DTE position unfilled through expiration; inspect logs and account state.
+- Each five completed option trades, fewer than four winners tightens signal
+  and spread gates; adjustments and realized P&L persist in
+  `spy_options_performance.json`. The policy only tightens and pauses if it
+  reaches its limits while still below target. It is not a validated options
+  backtest and cannot promise long-term effectiveness; broker fees are not
+  included in the local realized-P&L ledger. Back up this file across upgrades.
 - `spy_options_state.json` is local recovery state and is Git-ignored. After a
   clean Webull reset and confirmed zero positions/open orders, archive or
   remove this file before a fresh options run.
 - The existing equity backtest and weekly self-study do not model option
-  contracts/Greeks/0DTE expiration and are skipped in SPY options mode. Do not
-  use them as options profitability evidence.
+  contracts/Greeks/0DTE expiration and are skipped in SPY options mode. The
+  rolling options review is based on realized paper fills only; neither system
+  proves future profitability.
 - Sandbox orders need executable streaming NBBO liquidity. A reference bid/ask
   snapshot is not evidence that the sandbox matching engine can fill an order.
   Webull entries now fail closed if `bid_volume` or `ask_volume` is absent or

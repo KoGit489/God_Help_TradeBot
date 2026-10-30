@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from typing import Any
@@ -227,9 +227,12 @@ def select_option_contract(
     option_type: str,
     config: BotConfig,
     now: datetime,
+    *,
+    budget_usd: Decimal | None = None,
 ) -> ContractSelection:
-    """Pick the highest ask premium <= $1/share with fresh depth and long-option Greeks."""
-    per_share_budget = Decimal(str(config.spy_option_contract_budget_usd)) / OPTION_MULTIPLIER
+    """Pick the most expensive eligible contract within the total premium budget."""
+    total_budget = budget_usd if budget_usd is not None else Decimal(str(config.spy_option_initial_budget_usd))
+    per_share_budget = total_budget / OPTION_MULTIPLIER
     eligible: list[tuple[OptionContract, OptionQuote]] = []
     rejected = 0
     for contract in contracts:
@@ -242,6 +245,7 @@ def select_option_contract(
         if (
             quote.bid <= 0 or quote.ask < quote.bid or quote.ask <= 0
             or quote.bid_size <= 0 or quote.ask_size <= 0 or quote.ask > per_share_budget
+            or quote.volume <= 0
             or quote.gamma <= 0 or quote.theta >= 0 or quote.vega <= 0
             or quote.rho is None or quote.implied_volatility is None or quote.implied_volatility <= 0
             or (option_type == "CALL" and quote.delta <= 0)
@@ -285,24 +289,51 @@ class SPY0DTEOptionsLoop:
     max_consecutive_errors = 5
     error_backoff_seconds = 30.0
 
-    def __init__(self, broker, config: BotConfig, *, state_file: str | Path = STATE_FILE, now_provider=None, allow_entries=True):
+    def __init__(self, broker, config: BotConfig, *, state_file: str | Path = STATE_FILE,
+                 performance_file: str | Path | None = None, now_provider=None, allow_entries=True):
         if not broker.sandbox_mode or broker.live_mode:
             raise RuntimeError("SPY 0DTE options strategy is sandbox-only")
         self.broker = broker
         self.config = config
         self.allow_entries = allow_entries
         self.state_path = Path(state_file)
+        self.performance_path = Path(performance_file) if performance_file else self.state_path.with_name("spy_options_performance.json")
         self._now = now_provider or (lambda: datetime.now(EASTERN))
         self._consecutive_errors = 0
         self._market_news = None
         self._state = self._load_state()
+        self._performance = self._load_performance()
+        self._effective_config()
         if not self._state and any(position.quantity for position in broker.get_positions().values()):
-            raise RuntimeError("Sandbox has positions but no SPY option recovery state; startup blocked")
+            raise RuntimeError("Sandbox positions remain but no SPY option recovery state; startup blocked")
         status = self._state.get("status")
-        if status in ("OPEN", "ENTRY_PENDING", "EXIT_PENDING") and self._state.get("session_date") != self._now().date().isoformat():
+        if self._state and self._state.get("session_date") != self._now().date().isoformat():
+            if status in ("ENTRY_PENDING", "EXIT_PENDING"):
+                raise RuntimeError("Stale SPY option order is pending; manual order reconciliation required")
             if any(position.quantity for position in broker.get_positions().values()):
                 raise RuntimeError("Stale SPY option state and account positions remain; manual reconciliation required")
+            if status == "OPEN":
+                try:
+                    expiration = date.fromisoformat(self._state["expiration"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise RuntimeError("Stale SPY option expiration is invalid; manual reconciliation required") from exc
+                if expiration >= self._now().date():
+                    raise RuntimeError("Stale SPY option position has not expired; manual reconciliation required")
+                entry_quantity = int(self._state.get("entry_filled_quantity", 0))
+                if entry_quantity > 0:
+                    exited = int(self._state.get("exit_filled_quantity", 0))
+                    remaining = max(0, entry_quantity - exited)
+                    if remaining:
+                        self._state["exit_filled_quantity"] = entry_quantity
+                        self._state["expiry_assumed_worthless_contracts"] = remaining
+                    self._state["status"] = "CLOSED"
+                    self._log_realized_pnl(LoopSummary())
             self._state = {}
+            self._save_state()
+        elif status in ("SCANNING", "CLOSED", "NO_FILL") and any(
+            position.quantity for position in broker.get_positions().values()
+        ):
+            raise RuntimeError("Sandbox positions conflict with inactive SPY option state; startup blocked")
 
     def _load_state(self) -> dict[str, Any]:
         if not self.state_path.exists():
@@ -313,7 +344,132 @@ class SPY0DTEOptionsLoop:
             raise RuntimeError("SPY option state unreadable; startup blocked") from exc
         if not isinstance(data, dict):
             raise RuntimeError("SPY option state invalid; startup blocked")
+        if not data:
+            return {}
+        try:
+            date.fromisoformat(data["session_date"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("SPY option state date invalid; startup blocked") from exc
+        if data.get("status") not in ("SCANNING", "ENTRY_PENDING", "OPEN", "EXIT_PENDING", "CLOSED", "NO_FILL"):
+            raise RuntimeError("SPY option state status invalid; startup blocked")
+        if data["status"] in ("ENTRY_PENDING", "EXIT_PENDING") and (
+            not data.get("pending_order_id") or data.get("pending_order_role") not in ("ENTRY", "EXIT")
+        ):
+            raise RuntimeError("SPY option pending-order state invalid; startup blocked")
+        if data["status"] == "OPEN":
+            try:
+                date.fromisoformat(data["expiration"])
+                entry_quantity = int(data["entry_filled_quantity"])
+                exit_quantity = int(data.get("exit_filled_quantity", 0))
+                entry_price = Decimal(str(data["entry_average_price"]))
+                strike = Decimal(str(data["strike"]))
+            except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+                raise RuntimeError("SPY open-position state invalid; startup blocked") from exc
+            if (
+                not data.get("option_symbol") or data.get("option_type") not in ("CALL", "PUT")
+                or entry_quantity < 1 or not 0 <= exit_quantity <= entry_quantity
+                or not entry_price.is_finite() or entry_price <= 0
+                or not strike.is_finite() or strike <= 0
+            ):
+                raise RuntimeError("SPY open-position values invalid; startup blocked")
         return data
+
+    def _load_performance(self) -> dict[str, Any]:
+        defaults: dict[str, Any] = {
+            "version": 1,
+            "strategy_equity_usd": None,
+            "trades": [],
+            "reviews": [],
+            "last_reviewed_trade_count": 0,
+            "adaptive": {},
+            "paused": False,
+        }
+        if not self.performance_path.exists():
+            return defaults
+        try:
+            data = json.loads(self.performance_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("SPY options performance ledger unreadable; startup blocked") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("SPY options performance ledger invalid; startup blocked")
+        if not isinstance(data.get("trades", []), list) or any(not isinstance(item, dict) for item in data.get("trades", [])):
+            raise RuntimeError("SPY options performance trades invalid; startup blocked")
+        if not isinstance(data.get("reviews", []), list) or any(not isinstance(item, dict) for item in data.get("reviews", [])):
+            raise RuntimeError("SPY options performance reviews invalid; startup blocked")
+        if not isinstance(data.get("adaptive", {}), dict) or not isinstance(data.get("paused", False), bool):
+            raise RuntimeError("SPY options performance policy invalid; startup blocked")
+        merged = {**defaults, **data}
+        equity_value = merged.get("strategy_equity_usd")
+        if equity_value is not None:
+            equity = _decimal(merged, "strategy_equity_usd")
+            if equity is None or equity < 0:
+                raise RuntimeError("SPY options performance equity invalid; startup blocked")
+        reviewed = merged.get("last_reviewed_trade_count", 0)
+        if not isinstance(reviewed, int) or reviewed < 0 or reviewed > len(merged["trades"]):
+            raise RuntimeError("SPY options performance review count invalid; startup blocked")
+        return merged
+
+    def _save_performance(self) -> None:
+        self.performance_path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.performance_path.with_suffix(self.performance_path.suffix + ".tmp")
+        temp.write_text(json.dumps(self._performance, indent=2), encoding="utf-8")
+        temp.replace(self.performance_path)
+
+    def _effective_config(self) -> BotConfig:
+        adaptive = self._performance.get("adaptive", {})
+        overrides = {
+            name: adaptive[name]
+            for name in ("spy_option_strong_score", "spy_option_weak_floor", "spy_option_max_spread_percent")
+            if name in adaptive
+        }
+        return replace(self.config, **overrides) if overrides else self.config
+
+    def _strategy_budget(self, buying_power: Decimal) -> Decimal:
+        equity = _decimal(self._performance, "strategy_equity_usd")
+        if equity is None:
+            equity = min(Decimal(str(self.config.spy_option_initial_budget_usd)), buying_power)
+            self._performance["strategy_equity_usd"] = str(equity.quantize(Decimal("0.01")))
+            self._performance["initial_budget_usd"] = self._performance["strategy_equity_usd"]
+            self._save_performance()
+        return max(Decimal("0"), min(equity, buying_power))
+
+    def _review_performance(self) -> None:
+        trades = self._performance["trades"]
+        reviewed = int(self._performance.get("last_reviewed_trade_count", 0))
+        if len(trades) - reviewed < 5:
+            return
+        window = trades[-5:]
+        wins = sum(trade.get("outcome") == "win" for trade in window)
+        adaptive = self._performance["adaptive"]
+        changes: dict[str, float] = {}
+        if wins < 4:
+            strong = float(adaptive.get("spy_option_strong_score", self.config.spy_option_strong_score))
+            weak = float(adaptive.get("spy_option_weak_floor", self.config.spy_option_weak_floor))
+            spread = float(adaptive.get("spy_option_max_spread_percent", self.config.spy_option_max_spread_percent))
+            next_strong = min(0.90, strong + 0.03)
+            next_weak = min(weak + 0.03, next_strong - 0.01)
+            next_spread = max(8.0, spread - 1.0)
+            if next_strong > strong:
+                changes["spy_option_strong_score"] = round(next_strong, 4)
+            if next_weak > weak:
+                changes["spy_option_weak_floor"] = round(next_weak, 4)
+            if next_spread < spread:
+                changes["spy_option_max_spread_percent"] = round(next_spread, 4)
+            adaptive.update(changes)
+            if not changes:
+                self._performance["paused"] = True
+                self._performance["pause_reason"] = "five-trade win target missed at all tightening limits"
+        self._performance["reviews"].append({
+            "through_trade": len(trades),
+            "reviewed_at": self._now().isoformat(),
+            "wins": wins,
+            "trades": 5,
+            "target_wins": 4,
+            "changes": changes,
+            "paused": self._performance["paused"],
+        })
+        self._performance["last_reviewed_trade_count"] = len(trades)
+        self._save_performance()
 
     @property
     def recovery_order_ids(self) -> frozenset[str]:
@@ -361,6 +517,9 @@ class SPY0DTEOptionsLoop:
         if self._state.get("status") in ("ENTRY_PENDING", "EXIT_PENDING", "CLOSED", "NO_FILL"):
             self._save_state()
             return
+        if self._performance.get("paused"):
+            summary.events.append(LoopEvent("spy_options_paused", SPY_SYMBOL, self._performance.get("pause_reason", "performance guardrail paused entries")))
+            return
         start = session.market_open - timedelta(minutes=self.config.spy_option_scan_minutes_before_open)
         if now < start or now >= session.exit_time:
             return
@@ -375,14 +534,15 @@ class SPY0DTEOptionsLoop:
         self._open_position(signal, now, summary)
 
     def _evaluate_signal(self) -> OptionSignal:
+        active_config = self._effective_config()
         if self._market_news is None:
             try:
                 self._market_news = fetch_market_news()
             except Exception:
                 self._market_news = None
-        bull = confirm_candidate(self.broker, SPY_SYMBOL, min_score=self.config.spy_option_weak_floor, market_news=self._market_news)
-        bear = confirm_candidate_bearish(self.broker, SPY_SYMBOL, min_score=self.config.spy_option_weak_floor, market_news=self._market_news)
-        return decide_option_direction(bull, bear, self.config, trend=trend_direction(self.broker, SPY_SYMBOL))
+        bull = confirm_candidate(self.broker, SPY_SYMBOL, min_score=active_config.spy_option_weak_floor, market_news=self._market_news)
+        bear = confirm_candidate_bearish(self.broker, SPY_SYMBOL, min_score=active_config.spy_option_weak_floor, market_news=self._market_news)
+        return decide_option_direction(bull, bear, active_config, trend=trend_direction(self.broker, SPY_SYMBOL))
 
     def _list_contracts(self, expiry: str, spot: float) -> list[OptionContract]:
         found: dict[str, OptionContract] = {}
@@ -410,6 +570,14 @@ class SPY0DTEOptionsLoop:
         return list(found.values())
 
     def _open_position(self, signal: OptionSignal, now: datetime, summary: LoopSummary) -> None:
+        buying_power = self.broker.get_buying_power()
+        if buying_power is None or buying_power <= 0:
+            summary.events.append(LoopEvent("spy_option_sizing_blocked", SPY_SYMBOL, "buying power unavailable"))
+            return
+        budget = self._strategy_budget(buying_power)
+        if budget <= 0:
+            summary.events.append(LoopEvent("spy_option_sizing_blocked", SPY_SYMBOL, "strategy equity is depleted"))
+            return
         underlying = self.broker.get_latest_quote(SPY_SYMBOL)
         if underlying is None or underlying.last <= 0:
             summary.events.append(LoopEvent("spy_underlying_unavailable", SPY_SYMBOL, "SPY quote unavailable"))
@@ -420,16 +588,16 @@ class SPY0DTEOptionsLoop:
             summary.events.append(LoopEvent("spy_option_chain_empty", SPY_SYMBOL, "no same-day SPY contracts in scan range"))
             return
         quote_map = self.broker.get_option_snapshots([contract.option_symbol for contract in contracts])
-        selection = select_option_contract(contracts, quote_map, signal.option_type, self.config, now)
+        active_config = self._effective_config()
+        selection = select_option_contract(
+            contracts, quote_map, signal.option_type, active_config, now, budget_usd=budget,
+        )
         if selection.contract is None or selection.quote is None:
             summary.events.append(LoopEvent("spy_option_rejected", SPY_SYMBOL, selection.reason))
             return
-        buying_power = self.broker.get_buying_power()
-        if buying_power is None or buying_power <= 0:
-            summary.events.append(LoopEvent("spy_option_sizing_blocked", SPY_SYMBOL, "buying power unavailable"))
-            return
         unit_cost = selection.quote.ask * OPTION_MULTIPLIER
-        quantity = int((buying_power * Decimal(str(self.config.spy_option_buying_power_fraction)) / unit_cost).to_integral_value(rounding=ROUND_DOWN))
+        spendable = min(budget * Decimal(str(self.config.spy_option_buying_power_fraction)), buying_power)
+        quantity = int((spendable / unit_cost).to_integral_value(rounding=ROUND_DOWN))
         visible_ask_contracts = int(selection.quote.ask_size.to_integral_value(rounding=ROUND_DOWN))
         quantity = min(quantity, visible_ask_contracts)
         quantity = min(quantity, self.config.spy_option_max_contracts_per_order)
@@ -443,6 +611,10 @@ class SPY0DTEOptionsLoop:
             "expiration": expiry, "signal_regime": signal.regime,
             "entry_filled_quantity": 0, "exit_filled_quantity": 0,
             "entry_average_price": None, "requested_quantity": quantity,
+            "strategy_budget_at_entry_usd": str(budget),
+            "entry_quoted_ask": str(selection.quote.ask),
+            "entry_quote_volume": str(selection.quote.volume),
+            "entry_delta": selection.quote.delta,
             "pending_order_id": client_id, "pending_order_role": "ENTRY", "pending_order_polls": 0,
         })
         self._save_state()
@@ -614,8 +786,53 @@ class SPY0DTEOptionsLoop:
         total_exit_qty = self._state.get("exit_filled_quantity", 0)
         if entry is None or total_exit_qty <= 0:
             summary.events.append(LoopEvent("spy_option_closed", SPY_SYMBOL, "filled exit; P&L unavailable"))
+            self._performance["paused"] = True
+            self._performance["pause_reason"] = "closed trade P&L unavailable; reconcile ledger before entries resume"
+            self._save_performance()
             return
         exit_avg = Decimal(str(self._state.get("exit_notional", "0"))) / (OPTION_MULTIPLIER * total_exit_qty)
         pnl = (exit_avg - entry) * OPTION_MULTIPLIER * total_exit_qty
         outcome = "win" if pnl > 0 else "loss" if pnl < 0 else "flat"
-        summary.events.append(LoopEvent("spy_option_closed", SPY_SYMBOL, f"{total_exit_qty} contracts; P&L ${pnl:,.2f} [{outcome}]"))
+        expiry_count = int(self._state.get("expiry_assumed_worthless_contracts", 0))
+        detail = f"{total_exit_qty} contracts; P&L ${pnl:,.2f} [{outcome}]"
+        if expiry_count:
+            detail += f"; {expiry_count} expired contracts conservatively valued at $0"
+        summary.events.append(LoopEvent("spy_option_closed", SPY_SYMBOL, detail))
+        trade_id = f"{self._state.get('session_date')}:{self._state.get('option_symbol')}"
+        if any(trade.get("trade_id") == trade_id for trade in self._performance["trades"]):
+            return
+        equity = _decimal(self._performance, "strategy_equity_usd")
+        if equity is None:
+            equity = Decimal(str(self.config.spy_option_initial_budget_usd))
+        equity = max(Decimal("0"), equity + pnl).quantize(Decimal("0.01"))
+        self._performance["strategy_equity_usd"] = str(equity)
+        self._performance["trades"].append({
+            "trade_id": trade_id,
+            "date": self._state.get("session_date"),
+            "option_symbol": self._state.get("option_symbol"),
+            "expiration": self._state.get("expiration"),
+            "option_type": self._state.get("option_type"),
+            "signal_regime": self._state.get("signal_regime"),
+            "strategy_budget_at_entry_usd": self._state.get("strategy_budget_at_entry_usd"),
+            "entry_quoted_ask": self._state.get("entry_quoted_ask"),
+            "entry_quote_volume": self._state.get("entry_quote_volume"),
+            "entry_delta": self._state.get("entry_delta"),
+            "entry_average_premium": str(entry),
+            "exit_average_premium": str(exit_avg),
+            "contracts": total_exit_qty,
+            "realized_pnl_usd": str(pnl.quantize(Decimal("0.01"))),
+            "equity_after_usd": str(equity),
+            "outcome": outcome,
+            "expiry_assumed_worthless_contracts": expiry_count,
+        })
+        prior_review_count = len(self._performance["reviews"])
+        self._review_performance()
+        if len(self._performance["reviews"]) > prior_review_count:
+            review = self._performance["reviews"][-1]
+            detail = f"{review['wins']}/5 winning trades; target 4/5"
+            if review["changes"]:
+                detail += f"; tightened {review['changes']}"
+            if review["paused"]:
+                detail += "; entries paused for manual review"
+            summary.events.append(LoopEvent("spy_options_performance_review", SPY_SYMBOL, detail))
+        self._save_performance()

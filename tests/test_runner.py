@@ -55,7 +55,7 @@ def test_default_runner_dispatches_to_spy_options_loop(monkeypatch, tmp_path) ->
         error_backoff_seconds = 0
 
         def __init__(self, broker, config, **kwargs):
-            calls.append((config.strategy_mode, kwargs.get("state_file")))
+            calls.append((config.strategy_mode, kwargs.get("state_file"), kwargs.get("performance_file")))
             self.recovery_order_ids = frozenset()
             self._consecutive_errors = 0
 
@@ -68,9 +68,14 @@ def test_default_runner_dispatches_to_spy_options_loop(monkeypatch, tmp_path) ->
     monkeypatch.setattr(runner, "_setup_logging", lambda path: logging.getLogger("test-options-runner"))
     monkeypatch.setattr(runner.signal, "signal", lambda signum, handler: None)
 
-    runner.run_bot(config=BotConfig(), max_polls=1, options_state_file=tmp_path / "spy_options.json")
+    runner.run_bot(
+        config=BotConfig(), max_polls=1, options_state_file=tmp_path / "spy_options.json",
+        options_performance_file=tmp_path / "spy_options_performance.json",
+    )
 
-    assert calls == [("spy_0dte_options", tmp_path / "spy_options.json")]
+    assert calls == [(
+        "spy_0dte_options", tmp_path / "spy_options.json", tmp_path / "spy_options_performance.json",
+    )]
 
 
 @pytest.mark.parametrize("payload, allowed", [([], True), ([{"symbol": "RMSG"}], False), ({}, False), (None, False)])

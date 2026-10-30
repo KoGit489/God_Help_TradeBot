@@ -66,10 +66,9 @@ class BotConfig:
     study_interval_days: int = 5
     study_target_winning_days: int = 4
     study_auto_improve: bool = True
-    # SPY 0DTE long-option paper strategy. Premium cap is per standard
-    # 100-share contract; paper sizing uses available buying power.
-    spy_option_contract_budget_usd: float = 100.0
-    spy_option_buying_power_fraction: float = 0.98
+    # SPY paper strategy capital compounds by realized option P&L.
+    spy_option_initial_budget_usd: float = 100.0
+    spy_option_buying_power_fraction: float = 1.0
     spy_option_max_spread_percent: float = 20.0
     spy_option_min_abs_delta: float = 0.05
     spy_option_max_abs_delta: float = 0.65
@@ -132,8 +131,8 @@ class BotConfig:
             raise ValueError("study_interval_days must be at least 1")
         if self.study_target_winning_days < 1:
             raise ValueError("study_target_winning_days must be at least 1")
-        if self.spy_option_contract_budget_usd <= 0:
-            raise ValueError("spy_option_contract_budget_usd must be positive")
+        if self.spy_option_initial_budget_usd <= 0:
+            raise ValueError("spy_option_initial_budget_usd must be positive")
         if not 0 < self.spy_option_buying_power_fraction <= 1:
             raise ValueError("spy_option_buying_power_fraction must be in (0, 1]")
         if self.spy_option_max_spread_percent <= 0:

@@ -2,6 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from god_help_tradebot import BotConfig
+from god_help_tradebot.botconfig import load_bot_config
 from god_help_tradebot.confirm import ConfirmationReport
 from god_help_tradebot.schedule import EASTERN
 from god_help_tradebot.spy_options import (
@@ -72,14 +73,42 @@ def test_selects_highest_ask_under_one_dollar_with_liquidity_and_greeks() -> Non
     assert result.quote.ask == Decimal("0.95")
 
 
+def test_dynamic_budget_selects_most_expensive_affordable_contract() -> None:
+    contracts = [
+        _contract("SPY261028C00680000", "CALL"),
+        _contract("SPY261028C00681000", "CALL"),
+        _contract("SPY261028C00682000", "CALL"),
+    ]
+    snapshots = {
+        contracts[0].option_symbol: _snapshot(contracts[0].option_symbol, "0.75", bid="0.70"),
+        contracts[1].option_symbol: _snapshot(contracts[1].option_symbol, "1.25", bid="1.10"),
+        contracts[2].option_symbol: _snapshot(contracts[2].option_symbol, "1.31", bid="1.20"),
+    }
+    now = datetime(2026, 10, 28, 11, 0, tzinfo=EASTERN)
+
+    selection_130 = select_option_contract(contracts, snapshots, "CALL", BotConfig(), now, budget_usd=Decimal("130"))
+    selection_80 = select_option_contract(contracts, snapshots, "CALL", BotConfig(), now, budget_usd=Decimal("80"))
+
+    assert selection_130.contract == contracts[1]
+    assert selection_80.contract == contracts[0]
+
+
+def test_legacy_budget_setting_seeds_new_strategy_budget(tmp_path) -> None:
+    config_file = tmp_path / "bot_config.json"
+    config_file.write_text('{"spy_option_contract_budget_usd": 130}', encoding="utf-8")
+
+    assert load_bot_config(config_file).spy_option_initial_budget_usd == 130
+
+
 def test_contract_selector_rejects_missing_greeks_depth_and_stale_quotes() -> None:
     contract = _contract("SPY261028C00680000", "CALL")
     no_greeks = {"symbol": contract.option_symbol, "bid": "0.8", "ask": "0.9", "bid_size": "2", "ask_size": "3"}
     zero_depth = _snapshot(contract.option_symbol, "0.9") | {"ask_size": "0"}
+    zero_volume = _snapshot(contract.option_symbol, "0.9") | {"volume": "0"}
     stale = _snapshot(contract.option_symbol, "0.9", delay="3")
     selection_time = datetime(2026, 10, 28, 11, 0, tzinfo=EASTERN)
 
-    for raw in (no_greeks, zero_depth, stale):
+    for raw in (no_greeks, zero_depth, zero_volume, stale):
         result = select_option_contract([contract], {contract.option_symbol: raw}, "CALL", BotConfig(), selection_time)
         assert result.contract is None
 

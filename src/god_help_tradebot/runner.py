@@ -55,6 +55,7 @@ def run_bot(
     min_confirmation_score: float = 0.5,
     state_file: str | Path = "bot_state.json",
     options_state_file: str | Path = "spy_options_state.json",
+    options_performance_file: str | Path = "spy_options_performance.json",
     log_file: str | Path = LOG_FILE,
     stop_flag: Callable[[], bool] | None = None,
     record_data: bool = True,
@@ -79,7 +80,8 @@ def run_bot(
         from .spy_options import SPY0DTEOptionsLoop
 
         loop = SPY0DTEOptionsLoop(
-            broker, config, state_file=options_state_file, allow_entries=allow_entries
+            broker, config, state_file=options_state_file,
+            performance_file=options_performance_file, allow_entries=allow_entries
         )
         broker.assert_no_remote_open_orders(allowed_client_order_ids=loop.recovery_order_ids)
     else:

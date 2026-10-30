@@ -50,6 +50,9 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 spy_options_state.json
+spy_options_state.json.tmp
+spy_options_performance.json
+spy_options_performance.json.tmp
 cover/
 
 # Translations

@@ -681,7 +681,9 @@ class WebullSandboxBroker:
             return None
         assets = payload.get("account_currency_assets", [])
         record = assets[0] if assets and isinstance(assets[0], dict) else payload
-        value = record.get("buying_power") or record.get("cash_balance") or record.get("net_liquidation_value")
+        value = record.get("buying_power")
+        if value in (None, ""):
+            value = record.get("cash_balance")
         return Decimal(str(value)) if value not in (None, "") else None
 
     def get_order_status(self, client_order_id: str) -> dict[str, Any] | None:
