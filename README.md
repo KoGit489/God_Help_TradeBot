@@ -1,44 +1,41 @@
 # God_Help_TradeBot
 
-Private workspace for a Webull trading bot; test and validate before live trading.
+Sandbox-only Webull API bot. The default Prototype strategy is **SPY 0DTE long options**; live mode remains disabled.
 
-## Current status
+## SPY 0DTE Strategy
 
-The `Prototype` branch currently contains a broker-independent foundation:
+- Starts monitoring SPY at 9:25 AM ET; option entries are only attempted during CORE market hours.
+- Uses SPY 5-minute chart patterns/trend, ticker and broad-market news, flow/analyst signals when available, and option Greeks for contract validation.
+- Strong directional consensus buys with the signal (bullish = call, bearish = put). Moderate directional consensus is inverted per the configured rule. Neutral, conflicting, stale, illiquid, or incomplete data means no trade.
+- Selects the highest-ask same-day SPY call/put with premium no greater than $1.00 per share ($100 per standard 100-share contract), positive two-sided option depth, acceptable spread, and valid Greeks.
+- Paper contract quantity is bounded by sandbox buying power, visible ask size, and the per-order contract cap. Market orders can still slip, partially fill, or remain unfilled.
+- Tracks one entry per day. Take-profit is +30%, stop-loss is -10% from confirmed average fill, and the bot submits a market exit at 3:59 PM ET. The simulator may not fill an exit without bid liquidity; the state file and logs preserve that unresolved status.
+- The previous equity strategy is available only with `strategy_mode: "equity"`; its backtest/self-study is not an options backtest and is not run in SPY options mode.
 
-- Explicit price, position-value, and dollar-risk guardrails.
-- Decimal-based position sizing and take-profit planning.
-- Deterministic paper-mode candidate screening using price, momentum, volume, spread, and range position.
-- Virtual cash, positions, market/limit/stop fills, and long OCO-style target/stop behavior.
-- U.S. trading-session detection with holiday and early-close handling.
-- Webull sandbox adapter backed by the official OpenAPI SDK: authenticated quotes,
-  positions, real order previews, and simulated place/cancel against `api.sandbox.webull.com`.
-- No live trading: `live_mode` cannot be enabled and production endpoints are never used.
+This is experimental software, not investment advice or a guarantee of profit. 0DTE options can lose the entire premium rapidly. Test only in the sandbox and supervise every session.
 
-Sandbox credentials come from Webull OpenAPI Management; the bot targets the
-**Individual Cash** sandbox account (`WEBULL_ACCOUNT_ID`) and the free
-**Nasdaq Basic – Non Display** OpenAPI market-data permission.
-
-Run the tests with:
+## Run Tests
 
 ```powershell
 $env:PYTHONPATH = "$PWD\src"
-py -3 -m pytest -q
+py -3 -m pytest tests -q
 ```
 
-Sandbox setup:
+## Configure
 
-1. Copy `.env.example` to `.env` in the project root.
-2. Fill in the Webull sandbox credentials only.
-3. Keep `.env` local and uncommitted; it is already ignored by Git.
-4. Load the config through the bot with `load_webull_config()`.
+Copy `.env.example` to `.env` and set sandbox API credentials. Keep secrets out of Git. The default `BotConfig` selects `spy_0dte_options`; use `bot_config.json` or `BOT_STRATEGY_MODE=equity` to select the legacy equity monitor explicitly.
 
-```python
-from god_help_tradebot import load_webull_config
+Useful SPY controls in `bot_config.json`:
 
-config = load_webull_config()
-print(config.api_key, config.account_id)
+```json
+{
+  "strategy_mode": "spy_0dte_options",
+  "spy_option_contract_budget_usd": 100.0,
+  "spy_option_buying_power_fraction": 0.98,
+  "spy_option_max_spread_percent": 20.0,
+  "spy_option_strong_score": 0.70,
+  "spy_option_weak_floor": 0.55
+}
 ```
 
-The next integration step is the strategy monitoring loop: screen candidates, enter a
-sandbox position with bracket orders, and track exits against live sandbox quotes.
+See [DEPLOY.md](DEPLOY.md) for the VPS install and service instructions.

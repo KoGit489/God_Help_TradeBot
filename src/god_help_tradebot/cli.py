@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 
 from .botconfig import load_bot_config
 from .runner import run_bot
@@ -25,8 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-entries", action="store_true", help="Observe only; never enter positions")
     parser.add_argument("--events", action="store_true", help="Also subscribe to gRPC order events (polling still reconciles)")
     parser.add_argument("--min-confirmation", type=float, default=0.5, help="Minimum confirmation score to enter")
+    parser.add_argument("--strategy", choices=("spy_0dte_options", "equity"), help="Override configured strategy mode")
     parser.add_argument("--config-file", default="bot_config.json", help="Path to bot_config.json overrides")
     parser.add_argument("--state-file", default="bot_state.json", help="Path to persisted exit plans")
+    parser.add_argument("--options-state-file", default="spy_options_state.json", help="Path to persisted SPY option trade state")
     parser.add_argument("--log-file", default="bot.log", help="Path to the rotating log file")
     parser.add_argument("--backtest", metavar="TIMELINE.json", help="Replay a JSON timeline instead of live trading")
     parser.add_argument("--backtest-cash", type=float, default=100_000, help="Starting cash for backtests")
@@ -36,7 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_bot_config(args.config_file)
+    if args.strategy:
+        config = replace(config, strategy_mode=args.strategy)
     if args.backtest:
+        if config.strategy_mode != "equity":
+            raise SystemExit("The current backtest engine is equity-only; pass --strategy equity. SPY options must be paper-run under supervision.")
         from .backtest import load_timeline, run_backtest
 
         result = run_backtest(
@@ -60,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         use_events=args.events,
         min_confirmation_score=args.min_confirmation,
         state_file=args.state_file,
+        options_state_file=args.options_state_file,
         log_file=args.log_file,
     )
     return 0

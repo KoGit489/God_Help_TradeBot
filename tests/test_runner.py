@@ -6,6 +6,7 @@ import pytest
 from god_help_tradebot import BotConfig
 from god_help_tradebot import runner
 from god_help_tradebot.broker import WebullSandboxBroker
+import god_help_tradebot.spy_options as spy_options
 
 
 class _Broker:
@@ -15,7 +16,7 @@ class _Broker:
     def connect(self):
         return self
 
-    def assert_no_remote_open_orders(self):
+    def assert_no_remote_open_orders(self, **kwargs):
         pass
 
 
@@ -40,10 +41,36 @@ def test_fatal_error_halt_propagates_failure_to_systemd(monkeypatch, tmp_path) -
 
     with pytest.raises(RuntimeError, match="halted after 1 consecutive poll errors"):
         runner.run_bot(
-            config=BotConfig(),
+            config=BotConfig(strategy_mode="equity"),
             state_file=tmp_path / "state.json",
             log_file=tmp_path / "bot.log",
         )
+
+
+def test_default_runner_dispatches_to_spy_options_loop(monkeypatch, tmp_path) -> None:
+    calls = []
+
+    class _OptionsLoop:
+        max_consecutive_errors = 5
+        error_backoff_seconds = 0
+
+        def __init__(self, broker, config, **kwargs):
+            calls.append((config.strategy_mode, kwargs.get("state_file")))
+            self.recovery_order_ids = frozenset()
+            self._consecutive_errors = 0
+
+        def run_once(self, summary):
+            summary.polls += 1
+            return summary
+
+    monkeypatch.setattr(runner.WebullSandboxBroker, "from_env", lambda: _Broker())
+    monkeypatch.setattr(spy_options, "SPY0DTEOptionsLoop", _OptionsLoop)
+    monkeypatch.setattr(runner, "_setup_logging", lambda path: logging.getLogger("test-options-runner"))
+    monkeypatch.setattr(runner.signal, "signal", lambda signum, handler: None)
+
+    runner.run_bot(config=BotConfig(), max_polls=1, options_state_file=tmp_path / "spy_options.json")
+
+    assert calls == [("spy_0dte_options", tmp_path / "spy_options.json")]
 
 
 @pytest.mark.parametrize("payload, allowed", [([], True), ([{"symbol": "RMSG"}], False), ({}, False), (None, False)])

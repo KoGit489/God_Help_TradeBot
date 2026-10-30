@@ -5,6 +5,8 @@ from dataclasses import dataclass
 class BotConfig:
     """Explicit guardrails for a single planned trade."""
 
+    strategy_mode: str = "spy_0dte_options"
+
     min_symbol_price: float = 1.0
     max_symbol_price: float = 20.0
     risk_per_trade_usd: float = 25.0
@@ -64,8 +66,26 @@ class BotConfig:
     study_interval_days: int = 5
     study_target_winning_days: int = 4
     study_auto_improve: bool = True
+    # SPY 0DTE long-option paper strategy. Premium cap is per standard
+    # 100-share contract; paper sizing uses available buying power.
+    spy_option_contract_budget_usd: float = 100.0
+    spy_option_buying_power_fraction: float = 0.98
+    spy_option_max_spread_percent: float = 20.0
+    spy_option_min_abs_delta: float = 0.05
+    spy_option_max_abs_delta: float = 0.65
+    spy_option_strong_score: float = 0.70
+    spy_option_weak_floor: float = 0.55
+    spy_option_min_direction_gap: float = 0.05
+    spy_option_strong_direction_gap: float = 0.15
+    spy_option_max_strike_distance: float = 25.0
+    spy_option_min_signal_count: int = 2
+    spy_option_max_quote_delay_minutes: int = 1
+    spy_option_max_contracts_per_order: int = 50_000
+    spy_option_scan_minutes_before_open: int = 5
 
     def __post_init__(self) -> None:
+        if self.strategy_mode not in ("spy_0dte_options", "equity"):
+            raise ValueError("strategy_mode must be spy_0dte_options or equity")
         if self.min_symbol_price <= 0:
             raise ValueError("min_symbol_price must be positive")
         if self.max_symbol_price < self.min_symbol_price:
@@ -112,3 +132,25 @@ class BotConfig:
             raise ValueError("study_interval_days must be at least 1")
         if self.study_target_winning_days < 1:
             raise ValueError("study_target_winning_days must be at least 1")
+        if self.spy_option_contract_budget_usd <= 0:
+            raise ValueError("spy_option_contract_budget_usd must be positive")
+        if not 0 < self.spy_option_buying_power_fraction <= 1:
+            raise ValueError("spy_option_buying_power_fraction must be in (0, 1]")
+        if self.spy_option_max_spread_percent <= 0:
+            raise ValueError("spy_option_max_spread_percent must be positive")
+        if not 0 <= self.spy_option_min_abs_delta <= self.spy_option_max_abs_delta <= 1:
+            raise ValueError("SPY option delta bounds must be ordered within [0, 1]")
+        if not 0.5 <= self.spy_option_weak_floor < self.spy_option_strong_score <= 1:
+            raise ValueError("SPY option signal thresholds must satisfy 0.5 <= weak < strong <= 1")
+        if not 0 <= self.spy_option_min_direction_gap <= self.spy_option_strong_direction_gap <= 1:
+            raise ValueError("SPY option direction gaps must be ordered within [0, 1]")
+        if self.spy_option_max_strike_distance <= 0:
+            raise ValueError("spy_option_max_strike_distance must be positive")
+        if self.spy_option_min_signal_count < 1:
+            raise ValueError("spy_option_min_signal_count must be positive")
+        if self.spy_option_max_quote_delay_minutes < 0:
+            raise ValueError("spy_option_max_quote_delay_minutes cannot be negative")
+        if self.spy_option_max_contracts_per_order < 1:
+            raise ValueError("spy_option_max_contracts_per_order must be positive")
+        if self.spy_option_scan_minutes_before_open < 0:
+            raise ValueError("spy_option_scan_minutes_before_open cannot be negative")

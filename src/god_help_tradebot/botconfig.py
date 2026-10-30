@@ -17,6 +17,7 @@ DEFAULT_CONFIG_FILE = Path("bot_config.json")
 
 # Keys in the JSON file that map onto BotConfig fields.
 _TUNABLES = {
+    "strategy_mode": str,
     "min_symbol_price": float,
     "max_symbol_price": float,
     "risk_per_trade_usd": float,
@@ -49,6 +50,20 @@ _TUNABLES = {
     "study_interval_days": int,
     "study_target_winning_days": int,
     "study_auto_improve": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
+    "spy_option_contract_budget_usd": float,
+    "spy_option_buying_power_fraction": float,
+    "spy_option_max_spread_percent": float,
+    "spy_option_min_abs_delta": float,
+    "spy_option_max_abs_delta": float,
+    "spy_option_strong_score": float,
+    "spy_option_weak_floor": float,
+    "spy_option_min_direction_gap": float,
+    "spy_option_strong_direction_gap": float,
+    "spy_option_max_strike_distance": float,
+    "spy_option_min_signal_count": int,
+    "spy_option_max_quote_delay_minutes": int,
+    "spy_option_max_contracts_per_order": int,
+    "spy_option_scan_minutes_before_open": int,
 }
 
 

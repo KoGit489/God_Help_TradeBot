@@ -54,6 +54,7 @@ def run_bot(
     use_events: bool = False,
     min_confirmation_score: float = 0.5,
     state_file: str | Path = "bot_state.json",
+    options_state_file: str | Path = "spy_options_state.json",
     log_file: str | Path = LOG_FILE,
     stop_flag: Callable[[], bool] | None = None,
     record_data: bool = True,
@@ -73,20 +74,28 @@ def run_bot(
     broker = WebullSandboxBroker.from_env().connect()
     if not broker.sandbox_mode or broker.live_mode:
         raise RuntimeError("run_bot is sandbox-only; live mode is not enabled")
-    broker.assert_no_remote_open_orders()
 
-    loop = MonitorLoop(
-        broker,
-        config,
-        confirmation=confirm_candidate,
-        min_confirmation_score=min_confirmation_score,
-        allow_entries=allow_entries,
-        use_events=use_events,
-        state_store=StateStore(state_file),
-        recorder=SessionRecorder(data_dir) if record_data else None,
-        poll_seconds=poll_seconds,
-        max_polls=max_polls,
-    )
+    if config.strategy_mode == "spy_0dte_options":
+        from .spy_options import SPY0DTEOptionsLoop
+
+        loop = SPY0DTEOptionsLoop(
+            broker, config, state_file=options_state_file, allow_entries=allow_entries
+        )
+        broker.assert_no_remote_open_orders(allowed_client_order_ids=loop.recovery_order_ids)
+    else:
+        broker.assert_no_remote_open_orders()
+        loop = MonitorLoop(
+            broker,
+            config,
+            confirmation=confirm_candidate,
+            min_confirmation_score=min_confirmation_score,
+            allow_entries=allow_entries,
+            use_events=use_events,
+            state_store=StateStore(state_file),
+            recorder=SessionRecorder(data_dir) if record_data else None,
+            poll_seconds=poll_seconds,
+            max_polls=max_polls,
+        )
 
     stop_requested = {"flag": False}
 
@@ -117,7 +126,8 @@ def run_bot(
                 break
             if max_polls is not None and summary.polls >= max_polls:
                 break
-            _maybe_run_study(logger, config, data_dir, study_state_file, config_file)
+            if config.strategy_mode == "equity":
+                _maybe_run_study(logger, config, data_dir, study_state_file, config_file)
             import time
 
             time.sleep(loop.error_backoff_seconds if loop._consecutive_errors else poll_seconds)

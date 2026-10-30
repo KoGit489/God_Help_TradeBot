@@ -89,6 +89,28 @@ journalctl -u tradebot -f     # watch logs live
 
 ## Safety notes
 
+- Default strategy is `spy_0dte_options`; use `strategy_mode="equity"` only to
+  explicitly run the legacy equity strategy. Do not start options mode until
+  the sandbox account is reset/flat and has no working orders.
+- The SPY paper strategy monitors from 9:25 AM ET, buys only same-day SPY
+  contracts during CORE hours, and uses MARKET orders. A contract's quoted ask
+  must be <= $1.00/share ($100 standard contract premium). Paper quantity is
+  bounded by available buying power, visible ask size, and
+  `spy_option_max_contracts_per_order`; market slippage can still exceed the
+  quoted premium cap.
+- Strong/weak signal thresholds and the low-conviction inverse rule are
+  configurable. Signals combine existing SPY chart/flow/analyst/ticker-news
+  data with broad market news; Greeks validate contract exposure/liquidity,
+  they do not predict direction. Missing required inputs means no trade.
+- One entry attempt per session. TP/SL are +30%/-10% from confirmed option
+  fill. A market exit is submitted at 3:59 PM ET. Zero bid depth can leave a
+  0DTE position unfilled through expiration; inspect logs and account state.
+- `spy_options_state.json` is local recovery state and is Git-ignored. After a
+  clean Webull reset and confirmed zero positions/open orders, archive or
+  remove this file before a fresh options run.
+- The existing equity backtest and weekly self-study do not model option
+  contracts/Greeks/0DTE expiration and are skipped in SPY options mode. Do not
+  use them as options profitability evidence.
 - Sandbox orders need executable streaming NBBO liquidity. A reference bid/ask
   snapshot is not evidence that the sandbox matching engine can fill an order.
   Webull entries now fail closed if `bid_volume` or `ask_volume` is absent or

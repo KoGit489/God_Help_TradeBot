@@ -529,6 +529,117 @@ class WebullSandboxBroker:
             self._quote_cache[quote.symbol] = quote
         return quotes
 
+    def get_option_contracts(
+        self,
+        underlying: str,
+        expiration_date: str,
+        *,
+        strike_min: float,
+        strike_max: float,
+        pagination_key: str | None = None,
+    ) -> Any:
+        """List sandbox option contracts for one underlying and expiration."""
+        self._require_session()
+        return self.session.data_client.instrument.list_option_contracts(
+            category="US_OPTION",
+            underlying_symbols=underlying.upper(),
+            status="LISTING",
+            start_date=expiration_date,
+            end_date=expiration_date,
+            strike_price_gte=strike_min,
+            strike_price_lte=strike_max,
+            show_deliverables=True,
+            pagination_key=pagination_key,
+        )
+
+    def get_option_snapshots(self, option_symbols: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch option L1 snapshots in SDK-sized batches of at most 20."""
+        self._require_session()
+        records: dict[str, dict[str, Any]] = {}
+        symbols = list(dict.fromkeys(symbol for symbol in option_symbols if symbol))
+        for start in range(0, len(symbols), 20):
+            response = self.session.data_client.option_market_data.get_option_snapshot(
+                symbols[start : start + 20], "US_OPTION"
+            )
+            for record in _payload_records(response):
+                symbol = str(record.get("symbol") or record.get("option_symbol") or "").upper()
+                if symbol:
+                    records[symbol] = record
+        return records
+
+    def submit_option_market_order(
+        self,
+        underlying: str,
+        option_symbol: str,
+        strike_price: Decimal | float | str,
+        expiration_date: str,
+        option_type: str,
+        quantity: int,
+        *,
+        position_intent: str,
+        client_order_id: str | None = None,
+    ) -> PaperOrder:
+        """Submit one SPY single-leg market order to the sandbox only."""
+        self._require_session()
+        if self.live_mode or not self.sandbox_mode:
+            raise RuntimeError("options orders are sandbox-only")
+        if quantity < 1:
+            raise ValueError("option quantity must be positive")
+        option_type = option_type.upper()
+        if option_type not in ("CALL", "PUT"):
+            raise ValueError("option_type must be CALL or PUT")
+        if position_intent not in ("BUY_TO_OPEN", "SELL_TO_CLOSE"):
+            raise ValueError("only long option opens and closes are supported")
+
+        side = OrderSide.BUY if position_intent == "BUY_TO_OPEN" else OrderSide.SELL
+        client_order_id = client_order_id or uuid.uuid4().hex
+        payload = {
+            "client_order_id": client_order_id,
+            "combo_type": "NORMAL",
+            "order_type": "MARKET",
+            "quantity": str(quantity),
+            "option_strategy": "SINGLE",
+            "side": side.value,
+            "time_in_force": "DAY",
+            "entrust_type": "QTY",
+            "position_intent": position_intent,
+            "instrument_type": "OPTION",
+            "market": US_MARKET,
+            "symbol": underlying.upper(),
+            "support_trading_session": "CORE",
+            "legs": [{
+                "side": side.value,
+                "quantity": str(quantity),
+                "symbol": underlying.upper(),
+                "strike_price": str(strike_price),
+                "option_expire_date": expiration_date,
+                "instrument_type": "OPTION",
+                "option_type": option_type,
+                "market": US_MARKET,
+            }],
+        }
+        response = self.session.trade_client.order_v3.place_order(
+            self._resolve_account_id(), [payload]
+        )
+        status = getattr(response, "status_code", None)
+        if status != 200:
+            try:
+                detail = response.json()
+            except Exception:
+                detail = getattr(response, "text", "")
+            raise RuntimeError(f"Webull sandbox option order failed with HTTP {status}: {detail}")
+        order = PaperOrder(
+            order_id=self._next_order_id,
+            symbol=option_symbol.upper(),
+            side=side,
+            quantity=quantity,
+            order_type=OrderType.MARKET,
+            client_order_id=client_order_id,
+        )
+        self._orders[order.order_id] = order
+        self._next_order_id += 1
+        return order
+
     def set_quote(self, quote: Quote) -> Quote:
         self._quote_cache[quote.symbol.upper()] = quote
         return quote
@@ -604,8 +715,8 @@ class WebullSandboxBroker:
         """Locally tracked orders still open after the latest sync."""
         return [o for o in self._orders.values() if o.status is OrderStatus.OPEN]
 
-    def assert_no_remote_open_orders(self) -> None:
-        """Block startup rather than duplicate orders lost from the local cache."""
+    def assert_no_remote_open_orders(self, *, allowed_client_order_ids: set[str] | frozenset[str] = frozenset()) -> None:
+        """Block unknown remote orders while allowing persisted orders to reconcile."""
         self._require_session()
         response = self.session.trade_client.order_v3.get_order_open(
             self._resolve_account_id(), page_size=100
@@ -615,7 +726,11 @@ class WebullSandboxBroker:
         records = response.json()
         if not isinstance(records, list):
             raise RuntimeError("Unexpected open-order response; startup blocked")
-        if records:
+        if any(
+            not isinstance(record, dict)
+            or str(record.get("client_order_id") or "") not in allowed_client_order_ids
+            for record in records
+        ):
             raise RuntimeError(
                 "Server-side working orders exist; startup blocked to prevent duplicates. "
                 "Resolve existing orders before restarting."
