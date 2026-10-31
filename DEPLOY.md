@@ -133,10 +133,17 @@ archive it after confirming the sandbox has no positions or open orders.
   must fit the current budget; quantity is maximized within strategy equity,
   buying power, visible ask size, and `spy_option_max_contracts_per_order`.
   Market slippage can exceed the observed ask and budget.
-- Strong/weak signal thresholds and the low-conviction inverse rule are
-  configurable. Signals combine existing SPY chart/flow/analyst/ticker-news
-  data with broad market news; Greeks validate contract exposure/liquidity,
-  they do not predict direction. Missing required inputs means no trade.
+- Strong signals use strict Greek and spread qualification. If that finds no
+  contract for a weak directional signal, a second-stage search allows a
+  configurable spread up to 45% and missing secondary Greeks or reported
+  day-volume. It still requires a same-day contract, fresh quote, correctly
+  signed delta, positive displayed bid/ask depth, and ask premium within the
+  strategy budget. This makes weak-signal entries more likely, not guaranteed:
+  no order is submitted when those hard market-data or affordability checks
+  fail, and market execution may still reject or fail to fill.
+- Signal thresholds and the low-conviction inverse rule are configurable.
+  Signals combine SPY chart/flow/analyst/ticker-news data with broad market
+  news; Greeks validate exposure/liquidity, not direction.
 - One entry attempt per session. TP/SL are +30%/-10% of the confirmed option
   premium fill and are triggered using the option bid. A market exit is
   submitted at 3:59 PM ET. Zero bid depth can leave a

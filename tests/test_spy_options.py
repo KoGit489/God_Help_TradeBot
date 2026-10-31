@@ -11,6 +11,7 @@ from god_help_tradebot.spy_options import (
     parse_contract,
     parse_option_quote,
     select_option_contract,
+    select_weak_fallback_contract,
 )
 
 
@@ -91,6 +92,39 @@ def test_dynamic_budget_selects_most_expensive_affordable_contract() -> None:
 
     assert selection_130.contract == contracts[1]
     assert selection_80.contract == contracts[0]
+
+
+def test_weak_fallback_relaxes_greeks_and_spread_but_keeps_hard_quote_gates() -> None:
+    contract = _contract("SPY261028P00680000", "PUT")
+    quote = _snapshot(contract.option_symbol, "0.90", bid="0.60", delta="-0.30") | {
+        "gamma": None,
+        "theta": None,
+        "vega": None,
+        "rho": None,
+        "imp_vol": None,
+        "volume": "0",
+    }
+    now = datetime(2026, 10, 28, 11, 0, tzinfo=EASTERN)
+    strict = select_option_contract(
+        [contract], {contract.option_symbol: quote}, "PUT", BotConfig(), now,
+        budget_usd=Decimal("100"),
+    )
+    fallback = select_weak_fallback_contract(
+        [contract], {contract.option_symbol: quote}, "PUT", BotConfig(), now,
+        budget_usd=Decimal("100"),
+    )
+
+    assert strict.contract is None
+    assert fallback.contract == contract
+    assert "weak-signal fallback" in fallback.reason
+
+    stale = quote | {"delay_minutes": "3"}
+    rejected = select_weak_fallback_contract(
+        [contract], {contract.option_symbol: stale}, "PUT", BotConfig(), now,
+        budget_usd=Decimal("100"),
+    )
+    assert rejected.contract is None
+    assert "stale_quote=1" in rejected.reason
 
 
 def test_legacy_budget_setting_seeds_new_strategy_budget(tmp_path) -> None:

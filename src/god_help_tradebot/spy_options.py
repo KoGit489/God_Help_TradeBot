@@ -41,9 +41,9 @@ class OptionQuote:
     bid_size: Decimal
     ask_size: Decimal
     delta: float
-    gamma: float
-    theta: float
-    vega: float
+    gamma: float | None
+    theta: float | None
+    vega: float | None
     rho: float | None
     implied_volatility: float | None
     quote_time: str | None
@@ -142,7 +142,7 @@ def parse_option_quote(record: dict[str, Any] | None) -> OptionQuote | None:
     bid_size = _decimal(record, "bid_size", "bid_volume")
     ask_size = _decimal(record, "ask_size", "ask_volume")
     greeks = {key: _float(record, key) for key in ("delta", "gamma", "theta", "vega")}
-    if not symbol or bid is None or ask is None or bid_size is None or ask_size is None or any(v is None for v in greeks.values()):
+    if not symbol or bid is None or ask is None or bid_size is None or ask_size is None or greeks["delta"] is None:
         return None
     return OptionQuote(
         symbol, bid, ask, bid_size, ask_size,
@@ -243,10 +243,13 @@ def select_option_contract(
             rejected += 1
             continue
         if (
-            quote.bid <= 0 or quote.ask < quote.bid or quote.ask <= 0
+            quote.option_symbol != contract.option_symbol
+            or quote.bid <= 0 or quote.ask < quote.bid or quote.ask <= 0
             or quote.bid_size <= 0 or quote.ask_size <= 0 or quote.ask > per_share_budget
             or quote.volume <= 0
-            or quote.gamma <= 0 or quote.theta >= 0 or quote.vega <= 0
+            or quote.gamma is None or quote.gamma <= 0
+            or quote.theta is None or quote.theta >= 0
+            or quote.vega is None or quote.vega <= 0
             or quote.rho is None or quote.implied_volatility is None or quote.implied_volatility <= 0
             or (option_type == "CALL" and quote.delta <= 0)
             or (option_type == "PUT" and quote.delta >= 0)
@@ -266,6 +269,75 @@ def select_option_contract(
         return ContractSelection(None, None, f"no fresh liquid {option_type} contract within premium/Greek limits ({rejected} rejected)", rejected)
     contract, quote = max(eligible, key=lambda item: (item[1].ask, item[1].ask_size, item[1].volume))
     return ContractSelection(contract, quote, "highest ask premium within per-contract budget", rejected)
+
+
+def select_weak_fallback_contract(
+    contracts: list[OptionContract],
+    snapshots: dict[str, dict[str, Any]],
+    option_type: str,
+    config: BotConfig,
+    now: datetime,
+    *,
+    budget_usd: Decimal,
+) -> ContractSelection:
+    """Relax nonessential Greek/spread filters, keeping price and quote safety gates."""
+    per_share_budget = budget_usd / OPTION_MULTIPLIER
+    eligible: list[tuple[OptionContract, OptionQuote, float]] = []
+    rejection_counts: dict[str, int] = {}
+
+    def reject(reason: str) -> None:
+        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+    for contract in contracts:
+        if contract.expiration_date != now.date().isoformat() or contract.option_type != option_type:
+            continue
+        quote = parse_option_quote(snapshots.get(contract.option_symbol))
+        if quote is None:
+            reject("missing_quote_or_delta")
+            continue
+        if quote.option_symbol != contract.option_symbol:
+            reject("symbol_mismatch")
+            continue
+        if quote.bid <= 0 or quote.ask < quote.bid or quote.ask <= 0:
+            reject("invalid_bid_ask")
+            continue
+        if quote.bid_size <= 0 or quote.ask_size <= 0:
+            reject("no_displayed_depth")
+            continue
+        if quote.ask > per_share_budget:
+            reject("ask_over_budget")
+            continue
+        if not _quote_fresh(quote, now, config.spy_option_max_quote_delay_minutes):
+            reject("stale_quote")
+            continue
+        if (
+            (option_type == "CALL" and quote.delta <= 0)
+            or (option_type == "PUT" and quote.delta >= 0)
+            or not 0.02 <= abs(quote.delta) <= 0.90
+        ):
+            reject("invalid_directional_delta")
+            continue
+        spread_pct = float((quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2) * 100)
+        if spread_pct > config.spy_option_weak_max_spread_percent:
+            reject("spread_over_limit")
+            continue
+        eligible.append((contract, quote, spread_pct))
+    if not eligible:
+        detail = ", ".join(f"{name}={count}" for name, count in sorted(rejection_counts.items())) or "no matching contracts"
+        return ContractSelection(
+            None, None,
+            f"no weak-fallback {option_type} contract passed hard gates ({detail})",
+            sum(rejection_counts.values()),
+        )
+    contract, quote, spread_pct = max(
+        eligible,
+        key=lambda item: (item[1].ask, -item[2], item[1].ask_size, item[1].volume),
+    )
+    return ContractSelection(
+        contract, quote,
+        f"weak-signal fallback accepted with {spread_pct:.1f}% spread",
+        sum(rejection_counts.values()),
+    )
 
 
 def _is_quantity_rejection(exc: Exception) -> bool:
@@ -592,6 +664,17 @@ class SPY0DTEOptionsLoop:
         selection = select_option_contract(
             contracts, quote_map, signal.option_type, active_config, now, budget_usd=budget,
         )
+        used_weak_fallback = False
+        if selection.contract is None and signal.regime.startswith("weak_"):
+            selection = select_weak_fallback_contract(
+                contracts, quote_map, signal.option_type, active_config, now, budget_usd=budget,
+            )
+            used_weak_fallback = selection.contract is not None
+            if used_weak_fallback:
+                summary.events.append(LoopEvent(
+                    "spy_option_weak_fallback", SPY_SYMBOL,
+                    f"strict filters found no contract; {selection.reason}",
+                ))
         if selection.contract is None or selection.quote is None:
             summary.events.append(LoopEvent("spy_option_rejected", SPY_SYMBOL, selection.reason))
             return
@@ -609,6 +692,7 @@ class SPY0DTEOptionsLoop:
             "status": "ENTRY_PENDING", "entry_attempted": True, "option_symbol": selection.contract.option_symbol,
             "option_type": selection.contract.option_type, "strike": str(selection.contract.strike),
             "expiration": expiry, "signal_regime": signal.regime,
+            "weak_fallback_used": used_weak_fallback,
             "entry_filled_quantity": 0, "exit_filled_quantity": 0,
             "entry_average_price": None, "requested_quantity": quantity,
             "strategy_budget_at_entry_usd": str(budget),

@@ -70,6 +70,7 @@ class BotConfig:
     spy_option_initial_budget_usd: float = 100.0
     spy_option_buying_power_fraction: float = 1.0
     spy_option_max_spread_percent: float = 20.0
+    spy_option_weak_max_spread_percent: float = 45.0
     spy_option_min_abs_delta: float = 0.05
     spy_option_max_abs_delta: float = 0.65
     spy_option_strong_score: float = 0.70
@@ -137,6 +138,8 @@ class BotConfig:
             raise ValueError("spy_option_buying_power_fraction must be in (0, 1]")
         if self.spy_option_max_spread_percent <= 0:
             raise ValueError("spy_option_max_spread_percent must be positive")
+        if self.spy_option_weak_max_spread_percent < self.spy_option_max_spread_percent:
+            raise ValueError("weak-signal spread limit must be at least the strong-signal spread limit")
         if not 0 <= self.spy_option_min_abs_delta <= self.spy_option_max_abs_delta <= 1:
             raise ValueError("SPY option delta bounds must be ordered within [0, 1]")
         if not 0.5 <= self.spy_option_weak_floor < self.spy_option_strong_score <= 1:

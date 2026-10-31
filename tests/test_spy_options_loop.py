@@ -8,7 +8,7 @@ from god_help_tradebot import BotConfig, Quote
 from god_help_tradebot.monitor import LoopSummary
 from god_help_tradebot.paper import OrderSide, OrderType, PaperOrder
 from god_help_tradebot.schedule import EASTERN
-from god_help_tradebot.spy_options import OptionSignal, SPY0DTEOptionsLoop
+from god_help_tradebot.spy_options import OptionContract, OptionSignal, SPY0DTEOptionsLoop
 
 
 class _Response:
@@ -145,6 +145,48 @@ def test_spy_options_loop_caps_entry_by_visible_ask_contracts(tmp_path):
     loop.run_once()
 
     assert broker.orders[0][1] == 7
+
+
+def test_weak_signal_uses_relaxed_contract_fallback_when_strict_selector_rejects(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    option_symbol = "SPY261028P00600000"
+    broker = _Broker(_option_quote(
+        symbol=option_symbol, bid="0.60", ask="0.90", delta="-0.30",
+        gamma=None, theta=None, vega=None, rho=None, imp_vol=None, volume="0",
+    ))
+    loop = SPY0DTEOptionsLoop(
+        broker, BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+    )
+    loop._evaluate_signal = lambda: OptionSignal(
+        "PUT", "weak_bullish_fade", "weak fallback", .61, .34, 2, "up",
+    )
+    loop._list_contracts = lambda *args: [
+        OptionContract(option_symbol, now.date().isoformat(), Decimal("600"), "PUT"),
+    ]
+
+    summary = loop.run_once()
+
+    assert broker.orders[0][2] == "BUY_TO_OPEN"
+    assert loop._state["weak_fallback_used"] is True
+    assert any(event.kind == "spy_option_weak_fallback" for event in summary.events)
+
+
+def test_strong_signal_does_not_use_weak_contract_fallback(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    broker = _Broker(_option_quote(bid="0.60", ask="0.90", rho=None, imp_vol=None))
+    loop = SPY0DTEOptionsLoop(
+        broker, BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+    )
+    loop._evaluate_signal = lambda: OptionSignal(
+        "CALL", "strong_bullish", "strong reading", .82, .30, 4, "up",
+    )
+
+    summary = loop.run_once()
+
+    assert broker.orders == []
+    assert not any(event.kind == "spy_option_weak_fallback" for event in summary.events)
 
 
 @pytest.mark.parametrize("bid, reason", [("1.17", "TAKE_PROFIT"), ("0.81", "STOP_LOSS")])

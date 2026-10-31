@@ -53,6 +53,7 @@ _TUNABLES = {
     "spy_option_initial_budget_usd": float,
     "spy_option_buying_power_fraction": float,
     "spy_option_max_spread_percent": float,
+    "spy_option_weak_max_spread_percent": float,
     "spy_option_min_abs_delta": float,
     "spy_option_max_abs_delta": float,
     "spy_option_strong_score": float,
