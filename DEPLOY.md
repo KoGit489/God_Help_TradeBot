@@ -149,13 +149,17 @@ archive it after confirming the sandbox has no positions or open orders.
   explicitly run the legacy equity strategy. Do not start options mode until
   the sandbox account is reset/flat and has no working orders.
 - The SPY paper strategy monitors from 9:25 AM ET, buys same-day SPY contracts
-  during CORE hours, and uses MARKET orders. It scans every listed strike for
-  that day's expiration. There is no premium cap from the historical P&L
-  ledger; quantity is maximized within spendable broker buying power,
+  during CORE hours, and uses marketable LIMIT orders at the observed ask/bid.
+  It scans every listed strike for that day's expiration. There is no premium
+  cap from the historical P&L ledger; quantity is maximized within spendable broker buying power,
   `spy_option_buying_power_fraction`, visible ask size, and
-  `spy_option_max_contracts_per_order`. The default fraction is 100%, so an
-  order can use all available buying power. Market slippage can exceed the
-  observed ask; options may lose their entire premium.
+  `spy_option_max_contracts_per_order` (default 9,999). Webull's public API
+  documentation does not specify a universal numeric maximum; the broker may
+  enforce a lower account/contract-specific limit. The bot retries quantity
+  risk-rule rejections at reduced size. The default buying-power fraction is
+  100%, so an order can use all available buying power; options may lose their
+  entire premium. See Webull's [Options Trading API docs](https://developer.webull.com/apis/docs/trade-api/options)
+  for supported order types and request fields.
 - Entry logs record ask per share, premium per contract, and estimated total
   premium. If no contract qualifies, weak-fallback diagnostics include the
   observed ask range; stale quotes are observations, not executable prices.
@@ -171,7 +175,7 @@ archive it after confirming the sandbox has no positions or open orders.
   Signals combine SPY chart/flow/analyst/ticker-news data with broad market
   news; Greeks validate exposure/liquidity, not direction.
 - One entry attempt per session. TP/SL are +30%/-10% of the confirmed option
-  premium fill and are triggered using the option bid. A market exit is
+  premium fill and are triggered using the option bid. A limit exit at the bid is
   submitted at 3:59 PM ET. Zero bid depth can leave a
   0DTE position unfilled through expiration; inspect logs and account state.
 - Each five completed option trades, fewer than four winners tightens signal

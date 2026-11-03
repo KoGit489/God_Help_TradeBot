@@ -567,7 +567,7 @@ class WebullSandboxBroker:
                     records[symbol] = record
         return records
 
-    def submit_option_market_order(
+    def submit_option_limit_order(
         self,
         underlying: str,
         option_symbol: str,
@@ -576,15 +576,19 @@ class WebullSandboxBroker:
         option_type: str,
         quantity: int,
         *,
+        limit_price: Decimal | float | str,
         position_intent: str,
         client_order_id: str | None = None,
     ) -> PaperOrder:
-        """Submit one SPY single-leg market order to the sandbox only."""
+        """Submit one SPY single-leg limit order to the sandbox only."""
         self._require_session()
         if self.live_mode or not self.sandbox_mode:
             raise RuntimeError("options orders are sandbox-only")
         if quantity < 1:
             raise ValueError("option quantity must be positive")
+        limit_price = Decimal(str(limit_price))
+        if not limit_price.is_finite() or limit_price <= 0:
+            raise ValueError("option limit_price must be positive and finite")
         option_type = option_type.upper()
         if option_type not in ("CALL", "PUT"):
             raise ValueError("option_type must be CALL or PUT")
@@ -596,7 +600,8 @@ class WebullSandboxBroker:
         payload = {
             "client_order_id": client_order_id,
             "combo_type": "NORMAL",
-            "order_type": "MARKET",
+            "order_type": "LIMIT",
+            "limit_price": str(limit_price),
             "quantity": str(quantity),
             "option_strategy": "SINGLE",
             "side": side.value,
@@ -633,7 +638,8 @@ class WebullSandboxBroker:
             symbol=option_symbol.upper(),
             side=side,
             quantity=quantity,
-            order_type=OrderType.MARKET,
+            order_type=OrderType.LIMIT,
+            limit_price=limit_price,
             client_order_id=client_order_id,
         )
         self._orders[order.order_id] = order

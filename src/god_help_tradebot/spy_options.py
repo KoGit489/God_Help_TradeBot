@@ -651,6 +651,10 @@ class SPY0DTEOptionsLoop:
         if buying_power is None or buying_power <= 0:
             summary.events.append(LoopEvent("spy_option_sizing_blocked", SPY_SYMBOL, "buying power unavailable"))
             return
+        spendable = buying_power * Decimal(str(self.config.spy_option_buying_power_fraction))
+        if spendable <= 0:
+            summary.events.append(LoopEvent("spy_option_sizing_blocked", SPY_SYMBOL, "spendable buying power is zero"))
+            return
         expiry = now.date().isoformat()
         contracts = self._list_contracts(expiry)
         if not contracts:
@@ -659,12 +663,12 @@ class SPY0DTEOptionsLoop:
         quote_map = self.broker.get_option_snapshots([contract.option_symbol for contract in contracts])
         active_config = self._effective_config()
         selection = select_option_contract(
-            contracts, quote_map, signal.option_type, active_config, now,
+            contracts, quote_map, signal.option_type, active_config, now, budget_usd=spendable,
         )
         used_weak_fallback = False
         if selection.contract is None and signal.regime.startswith("weak_"):
             selection = select_weak_fallback_contract(
-                contracts, quote_map, signal.option_type, active_config, now,
+                contracts, quote_map, signal.option_type, active_config, now, budget_usd=spendable,
             )
             used_weak_fallback = selection.contract is not None
             if used_weak_fallback:
@@ -676,7 +680,6 @@ class SPY0DTEOptionsLoop:
             summary.events.append(LoopEvent("spy_option_rejected", SPY_SYMBOL, selection.reason))
             return
         unit_cost = selection.quote.ask * OPTION_MULTIPLIER
-        spendable = buying_power * Decimal(str(self.config.spy_option_buying_power_fraction))
         quantity = int((spendable / unit_cost).to_integral_value(rounding=ROUND_DOWN))
         visible_ask_contracts = int(selection.quote.ask_size.to_integral_value(rounding=ROUND_DOWN))
         quantity = min(quantity, visible_ask_contracts)
@@ -701,9 +704,10 @@ class SPY0DTEOptionsLoop:
         self._save_state()
         while True:
             try:
-                order = self.broker.submit_option_market_order(
+                order = self.broker.submit_option_limit_order(
                     SPY_SYMBOL, selection.contract.option_symbol, selection.contract.strike,
                     expiry, selection.contract.option_type, quantity,
+                    limit_price=selection.quote.ask,
                     position_intent="BUY_TO_OPEN", client_order_id=client_id,
                 )
                 break
@@ -717,7 +721,7 @@ class SPY0DTEOptionsLoop:
         summary.entries.append(order)
         summary.events.append(LoopEvent(
             "spy_option_entry", selection.contract.option_symbol,
-            f"MARKET BUY {quantity} {selection.contract.option_type}; ask=${selection.quote.ask:.2f}/share "
+            f"LIMIT BUY {quantity} {selection.contract.option_type} @ ${selection.quote.ask:.2f}/share "
             f"premium/contract=${unit_cost:,.2f}, estimated_total=${unit_cost * quantity:,.2f}, "
             f"buying_power=${buying_power:,.2f}, selection={selection.reason}, signal={signal.regime}",
         ))
@@ -852,12 +856,13 @@ class SPY0DTEOptionsLoop:
             "exit_reason": reason,
         })
         self._save_state()
-        order = self.broker.submit_option_market_order(
+        order = self.broker.submit_option_limit_order(
             SPY_SYMBOL, option_symbol, self._state["strike"], self._state["expiration"],
-            self._state["option_type"], quantity, position_intent="SELL_TO_CLOSE", client_order_id=client_id,
+            self._state["option_type"], quantity, limit_price=quote.bid,
+            position_intent="SELL_TO_CLOSE", client_order_id=client_id,
         )
         summary.exits.append(order)
-        summary.events.append(LoopEvent("spy_option_exit", option_symbol, f"MARKET SELL {quantity} ({reason}) at bid {quote.bid}"))
+        summary.events.append(LoopEvent("spy_option_exit", option_symbol, f"LIMIT SELL {quantity} ({reason}) @ bid ${quote.bid:.2f}"))
 
     def _clear_pending(self) -> None:
         for key in ("pending_order_id", "pending_order_role", "pending_order_polls", "pending_order_filled_seen", "pending_order_avg_price", "pending_base_exit_filled"):

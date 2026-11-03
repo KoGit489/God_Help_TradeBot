@@ -47,11 +47,14 @@ class _Broker:
     def get_buying_power(self):
         return Decimal("10000")
 
-    def submit_option_market_order(self, underlying, option_symbol, strike, expiry, option_type,
-                                   quantity, *, position_intent, client_order_id=None):
-        self.orders.append((option_symbol, quantity, position_intent, client_order_id))
-        return PaperOrder(1, option_symbol, OrderSide.BUY, quantity, OrderType.MARKET,
-                          client_order_id=client_order_id)
+    def submit_option_limit_order(self, underlying, option_symbol, strike, expiry, option_type,
+                                  quantity, *, limit_price, position_intent, client_order_id=None):
+        self.orders.append((option_symbol, quantity, position_intent, client_order_id, limit_price))
+        side = OrderSide.BUY if position_intent == "BUY_TO_OPEN" else OrderSide.SELL
+        return PaperOrder(
+            1, option_symbol, side, quantity, OrderType.LIMIT,
+            limit_price=Decimal(str(limit_price)), client_order_id=client_order_id,
+        )
 
 
 def _option_quote(**overrides):
@@ -66,7 +69,7 @@ def _option_quote(**overrides):
     return value
 
 
-def test_spy_options_loop_submits_max_affordable_market_contracts(tmp_path, monkeypatch):
+def test_spy_options_loop_submits_max_affordable_marketable_limit_contracts(tmp_path, monkeypatch):
     import god_help_tradebot.spy_options as strategy
 
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
@@ -119,9 +122,24 @@ def test_entry_logs_premium_and_sizes_above_old_reporting_baseline(tmp_path):
 
     assert broker.orders[0][1] == 40
     entry = next(event for event in summary.events if event.kind == "spy_option_entry")
-    assert "ask=$2.50/share" in entry.detail
+    assert "@ $2.50/share" in entry.detail
     assert "premium/contract=$250.00" in entry.detail
     assert "estimated_total=$10,000.00" in entry.detail
+
+
+def test_entry_quantity_is_capped_at_9999_contracts(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    broker = _Broker(_option_quote(ask_size="100000"))
+    broker.get_buying_power = lambda: Decimal("1000000")
+    loop = SPY0DTEOptionsLoop(
+        broker, BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+    )
+    loop._evaluate_signal = lambda: OptionSignal("CALL", "strong_bullish", "test", .82, .30, 4, "up")
+
+    loop.run_once()
+
+    assert broker.orders[0][1] == 9_999
 
 
 def test_contract_scan_requests_all_same_day_strikes(tmp_path):
@@ -179,7 +197,7 @@ def test_spy_options_loop_retries_quantity_rejection_at_half_size(tmp_path, monk
         state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
     )
     loop._evaluate_signal = lambda: OptionSignal("CALL", "strong_bullish", "test", .82, .30, 4, "up")
-    submit = broker.submit_option_market_order
+    submit = broker.submit_option_limit_order
     requested_quantities = []
 
     def reject_once(*args, **kwargs):
@@ -188,7 +206,7 @@ def test_spy_options_loop_retries_quantity_rejection_at_half_size(tmp_path, monk
             raise RuntimeError("ORDER_RISK_RULE_OPTIONS: maximum quantity exceeded")
         return submit(*args, **kwargs)
 
-    monkeypatch.setattr(broker, "submit_option_market_order", reject_once)
+    monkeypatch.setattr(broker, "submit_option_limit_order", reject_once)
 
     summary = loop.run_once()
 
@@ -274,6 +292,7 @@ def test_take_profit_and_stop_loss_use_option_premium(tmp_path, bid, reason):
 
     assert loop._state["exit_reason"] == reason
     assert broker.orders[-1][2] == "SELL_TO_CLOSE"
+    assert broker.orders[-1][4] == Decimal(bid)
 
 
 def test_partial_exit_notional_uses_cumulative_average_fill(tmp_path):

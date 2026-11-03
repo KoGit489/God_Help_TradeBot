@@ -31,17 +31,18 @@ def _broker(live_mode=False):
     return broker
 
 
-def test_spy_option_market_order_uses_single_leg_buy_to_open_payload():
+def test_spy_option_limit_order_uses_single_leg_buy_to_open_payload():
     broker = _broker()
-    order = broker.submit_option_market_order(
+    order = broker.submit_option_limit_order(
         "SPY", "SPY261028C00680000", Decimal("680"), "2026-10-28", "CALL", 3,
-        position_intent="BUY_TO_OPEN", client_order_id="client-1",
+        limit_price=Decimal("2.50"), position_intent="BUY_TO_OPEN", client_order_id="client-1",
     )
 
     account_id, orders = broker.session.trade_client.order_v3.calls[0]
     payload = orders[0]
     assert account_id == "paper-account"
-    assert payload["order_type"] == "MARKET"
+    assert payload["order_type"] == "LIMIT"
+    assert payload["limit_price"] == "2.50"
     assert payload["instrument_type"] == "OPTION"
     assert payload["option_strategy"] == "SINGLE"
     assert payload["position_intent"] == "BUY_TO_OPEN"
@@ -54,18 +55,18 @@ def test_spy_option_market_order_uses_single_leg_buy_to_open_payload():
 def test_spy_option_order_refuses_non_sandbox_mode():
     broker = _broker(live_mode=True)
     with pytest.raises(RuntimeError, match="sandbox-only"):
-        broker.submit_option_market_order(
+        broker.submit_option_limit_order(
             "SPY", "SPY261028P00680000", Decimal("680"), "2026-10-28", "PUT", 1,
-            position_intent="BUY_TO_OPEN",
+            limit_price=Decimal("1.00"), position_intent="BUY_TO_OPEN",
         )
 
 
 def test_spy_option_order_only_allows_long_open_and_close():
     broker = _broker()
     with pytest.raises(ValueError, match="only long option opens and closes"):
-        broker.submit_option_market_order(
+        broker.submit_option_limit_order(
             "SPY", "SPY261028C00680000", Decimal("680"), "2026-10-28", "CALL", 1,
-            position_intent="SELL_TO_OPEN",
+            limit_price=Decimal("1.00"), position_intent="SELL_TO_OPEN",
         )
 
 
