@@ -359,6 +359,14 @@ def _is_quantity_rejection(exc: Exception) -> bool:
     ))
 
 
+def _is_definitive_order_rejection(exc: Exception) -> bool:
+    text = str(exc).upper()
+    return any(value in text for value in (
+        "HTTP 4", "HTTP STATUS: 4", "ILLEGAL_PARAMETER", "INVALID_PARAMETER",
+        "ORDER_REJECTED", "ORDER REJECTED",
+    ))
+
+
 def _state_contract(state: dict[str, Any]) -> OptionContract:
     return OptionContract(
         state["option_symbol"], state["expiration"], Decimal(state["strike"]),
@@ -465,6 +473,7 @@ class SPY0DTEOptionsLoop:
             "reviews": [],
             "capital_adjustments": [],
             "last_reviewed_trade_count": 0,
+            "max_accepted_contracts_per_order": None,
             "adaptive": {},
             "paused": False,
         }
@@ -495,6 +504,13 @@ class SPY0DTEOptionsLoop:
         reviewed = merged.get("last_reviewed_trade_count", 0)
         if not isinstance(reviewed, int) or reviewed < 0 or reviewed > len(merged["trades"]):
             raise RuntimeError("SPY options performance review count invalid; startup blocked")
+        learned_ceiling = merged.get("max_accepted_contracts_per_order")
+        if learned_ceiling is not None and (
+            not isinstance(learned_ceiling, int)
+            or learned_ceiling < 1
+            or learned_ceiling > self.config.spy_option_max_contracts_per_order
+        ):
+            raise RuntimeError("SPY options learned order ceiling invalid; startup blocked")
         return merged
 
     def _save_performance(self) -> None:
@@ -681,12 +697,13 @@ class SPY0DTEOptionsLoop:
             return
         unit_cost = selection.quote.ask * OPTION_MULTIPLIER
         quantity = int((spendable / unit_cost).to_integral_value(rounding=ROUND_DOWN))
-        visible_ask_contracts = int(selection.quote.ask_size.to_integral_value(rounding=ROUND_DOWN))
-        quantity = min(quantity, visible_ask_contracts)
         quantity = min(quantity, self.config.spy_option_max_contracts_per_order)
         if quantity < 1:
             summary.events.append(LoopEvent("spy_option_sizing_blocked", SPY_SYMBOL, "buying power does not cover one contract"))
             return
+        learned_ceiling = self._performance.get("max_accepted_contracts_per_order")
+        if learned_ceiling is not None:
+            quantity = min(quantity, learned_ceiling)
         client_id = uuid.uuid4().hex
         self._state.update({
             "status": "ENTRY_PENDING", "entry_attempted": True, "option_symbol": selection.contract.option_symbol,
@@ -702,26 +719,57 @@ class SPY0DTEOptionsLoop:
             "pending_order_id": client_id, "pending_order_role": "ENTRY", "pending_order_polls": 0,
         })
         self._save_state()
+        quantity_rejected = False
         while True:
             try:
-                order = self.broker.submit_option_limit_order(
+                order = self.broker.submit_option_market_order(
                     SPY_SYMBOL, selection.contract.option_symbol, selection.contract.strike,
                     expiry, selection.contract.option_type, quantity,
-                    limit_price=selection.quote.ask,
                     position_intent="BUY_TO_OPEN", client_order_id=client_id,
                 )
                 break
             except Exception as exc:
-                if not _is_quantity_rejection(exc) or quantity <= 1:
-                    raise
-                quantity = max(1, quantity // 2)
-                client_id = uuid.uuid4().hex
-                self._state.update({"requested_quantity": quantity, "pending_order_id": client_id})
-                self._save_state()
+                if _is_quantity_rejection(exc):
+                    if quantity > 1:
+                        quantity -= 1
+                        quantity_rejected = True
+                        client_id = uuid.uuid4().hex
+                        self._state.update({"requested_quantity": quantity, "pending_order_id": client_id})
+                        self._save_state()
+                        continue
+                    self._state["status"] = "NO_FILL"
+                    self._clear_pending()
+                    self._save_state()
+                    summary.events.append(LoopEvent(
+                        "spy_option_sizing_blocked", SPY_SYMBOL,
+                        "broker rejected one contract; no smaller quantity is possible",
+                    ))
+                    return
+                if _is_definitive_order_rejection(exc):
+                    self._state["status"] = "NO_FILL"
+                    self._clear_pending()
+                    self._save_state()
+                    summary.events.append(LoopEvent(
+                        "spy_option_entry_rejected", selection.contract.option_symbol,
+                        f"broker definitively rejected MARKET entry; no retry submitted: {exc}",
+                    ))
+                    return
+                raise
+        if quantity_rejected:
+            prior_ceiling = self._performance.get("max_accepted_contracts_per_order")
+            self._performance["max_accepted_contracts_per_order"] = (
+                min(prior_ceiling, quantity) if prior_ceiling is not None else quantity
+            )
+            self._performance["order_ceiling_updated_at"] = now.isoformat()
+            self._save_performance()
+            summary.events.append(LoopEvent(
+                "spy_option_quantity_ceiling", SPY_SYMBOL,
+                f"quantity rejection; accepted ceiling recorded at {quantity} contracts per order",
+            ))
         summary.entries.append(order)
         summary.events.append(LoopEvent(
             "spy_option_entry", selection.contract.option_symbol,
-            f"LIMIT BUY {quantity} {selection.contract.option_type} @ ${selection.quote.ask:.2f}/share "
+            f"MARKET BUY {quantity} {selection.contract.option_type}; quoted ask=${selection.quote.ask:.2f}/share "
             f"premium/contract=${unit_cost:,.2f}, estimated_total=${unit_cost * quantity:,.2f}, "
             f"buying_power=${buying_power:,.2f}, selection={selection.reason}, signal={signal.regime}",
         ))
@@ -856,13 +904,13 @@ class SPY0DTEOptionsLoop:
             "exit_reason": reason,
         })
         self._save_state()
-        order = self.broker.submit_option_limit_order(
+        order = self.broker.submit_option_market_order(
             SPY_SYMBOL, option_symbol, self._state["strike"], self._state["expiration"],
-            self._state["option_type"], quantity, limit_price=quote.bid,
+            self._state["option_type"], quantity,
             position_intent="SELL_TO_CLOSE", client_order_id=client_id,
         )
         summary.exits.append(order)
-        summary.events.append(LoopEvent("spy_option_exit", option_symbol, f"LIMIT SELL {quantity} ({reason}) @ bid ${quote.bid:.2f}"))
+        summary.events.append(LoopEvent("spy_option_exit", option_symbol, f"MARKET SELL {quantity} ({reason}) at bid ${quote.bid:.2f}"))
 
     def _clear_pending(self) -> None:
         for key in ("pending_order_id", "pending_order_role", "pending_order_polls", "pending_order_filled_seen", "pending_order_avg_price", "pending_base_exit_filled"):
