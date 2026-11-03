@@ -121,6 +121,7 @@ config.pop("spy_option_max_strike_distance", None)
 config.update({
   "strategy_mode": "spy_0dte_options",
   "spy_option_buying_power_fraction": 1.0,
+  "spy_option_max_contracts_per_order": 9999,
 })
 temp = path.with_suffix(".json.tmp")
 temp.write_text(json.dumps(config, indent=2) + "\n")
