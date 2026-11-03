@@ -167,10 +167,6 @@ def test_bot_config_ignores_removed_equity_override_and_strike_window(tmp_path) 
     assert not hasattr(config, "spy_option_max_strike_distance")
 
 
-def test_per_order_contract_ceiling_defaults_to_9999_and_rejects_larger_values() -> None:
-    assert BotConfig().spy_option_max_contracts_per_order == 9_999
-    with pytest.raises(ValueError, match="between 1 and 9999"):
-        BotConfig(spy_option_max_contracts_per_order=10_000)
 
 
 def test_contract_selector_rejects_missing_greeks_depth_and_stale_quotes() -> None:

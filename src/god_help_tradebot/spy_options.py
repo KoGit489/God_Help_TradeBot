@@ -508,7 +508,6 @@ class SPY0DTEOptionsLoop:
         if learned_ceiling is not None and (
             not isinstance(learned_ceiling, int)
             or learned_ceiling < 1
-            or learned_ceiling > self.config.spy_option_max_contracts_per_order
         ):
             raise RuntimeError("SPY options learned order ceiling invalid; startup blocked")
         return merged
@@ -697,7 +696,6 @@ class SPY0DTEOptionsLoop:
             return
         unit_cost = selection.quote.ask * OPTION_MULTIPLIER
         quantity = int((spendable / unit_cost).to_integral_value(rounding=ROUND_DOWN))
-        quantity = min(quantity, self.config.spy_option_max_contracts_per_order)
         if quantity < 1:
             summary.events.append(LoopEvent("spy_option_sizing_blocked", SPY_SYMBOL, "buying power does not cover one contract"))
             return

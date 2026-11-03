@@ -118,10 +118,10 @@ path = Path("bot_config.json")
 config = json.loads(path.read_text()) if path.exists() else {}
 config.pop("spy_option_starting_equity_override_usd", None)
 config.pop("spy_option_max_strike_distance", None)
+config.pop("spy_option_max_contracts_per_order", None)
 config.update({
   "strategy_mode": "spy_0dte_options",
   "spy_option_buying_power_fraction": 1.0,
-  "spy_option_max_contracts_per_order": 9999,
 })
 temp = path.with_suffix(".json.tmp")
 temp.write_text(json.dumps(config, indent=2) + "\n")
@@ -152,13 +152,12 @@ archive it after confirming the sandbox has no positions or open orders.
 - The SPY paper strategy monitors from 9:25 AM ET, buys same-day SPY contracts
   during CORE hours, and uses MARKET orders.
   It scans every listed strike for that day's expiration. There is no premium
-  cap from the historical P&L ledger; quantity is maximized within spendable broker buying power,
-  `spy_option_buying_power_fraction`, and
-  `spy_option_max_contracts_per_order` (default 9,999). Webull's public API
-  documentation does not specify a universal numeric maximum; the broker may
-  enforce a lower account/contract-specific limit. On a quantity rejection,
-  the bot decrements by one and retries, then persists the first accepted
-  quantity as its future per-order ceiling. The default buying-power fraction is
+  cap from the historical P&L ledger; quantity uses spendable broker buying
+  power and `spy_option_buying_power_fraction`, with no configured local
+  contract ceiling. Webull's public API documentation does not specify a
+  universal numeric maximum. On a quantity rejection, the bot decrements by
+  one and retries, then persists the first accepted quantity as its future
+  ceiling. The default buying-power fraction is
   100%, so an order can use all available buying power; options may lose their
   entire premium. The dedicated [Options Trading API docs](https://developer.webull.com/apis/docs/trade-api/options)
   list MARKET orders, though Webull's general FAQ conflicts; verify sandbox

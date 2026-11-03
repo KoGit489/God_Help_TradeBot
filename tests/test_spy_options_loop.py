@@ -128,7 +128,7 @@ def test_entry_logs_premium_and_sizes_above_old_reporting_baseline(tmp_path):
     assert "estimated_total=$10,000.00" in entry.detail
 
 
-def test_entry_quantity_is_capped_at_9999_contracts(tmp_path):
+def test_entry_quantity_has_no_fixed_local_ceiling(tmp_path):
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
     broker = _Broker(_option_quote(ask_size="100000"))
     broker.get_buying_power = lambda: Decimal("1000000")
@@ -140,7 +140,7 @@ def test_entry_quantity_is_capped_at_9999_contracts(tmp_path):
 
     loop.run_once()
 
-    assert broker.orders[0][1] == 9_999
+    assert broker.orders[0][1] == 11_111
 
 
 def test_learned_order_ceiling_is_reused_on_future_entries(tmp_path):
