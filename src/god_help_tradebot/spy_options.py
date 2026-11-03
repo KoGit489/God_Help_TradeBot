@@ -230,11 +230,11 @@ def select_option_contract(
     *,
     budget_usd: Decimal | None = None,
 ) -> ContractSelection:
-    """Pick the most expensive eligible contract within the total premium budget."""
-    total_budget = budget_usd if budget_usd is not None else Decimal(str(config.spy_option_initial_budget_usd))
-    per_share_budget = total_budget / OPTION_MULTIPLIER
+    """Pick the highest-premium strict-qualified contract, optionally capped by a caller."""
+    per_share_budget = budget_usd / OPTION_MULTIPLIER if budget_usd is not None else None
     eligible: list[tuple[OptionContract, OptionQuote]] = []
     rejected = 0
+    observed_asks: list[Decimal] = []
     for contract in contracts:
         if contract.expiration_date != now.date().isoformat() or contract.option_type != option_type:
             continue
@@ -242,10 +242,13 @@ def select_option_contract(
         if quote is None:
             rejected += 1
             continue
+        if quote.ask > 0:
+            observed_asks.append(quote.ask)
         if (
             quote.option_symbol != contract.option_symbol
             or quote.bid <= 0 or quote.ask < quote.bid or quote.ask <= 0
-            or quote.bid_size <= 0 or quote.ask_size <= 0 or quote.ask > per_share_budget
+            or quote.bid_size <= 0 or quote.ask_size <= 0
+            or (per_share_budget is not None and quote.ask > per_share_budget)
             or quote.volume <= 0
             or quote.gamma is None or quote.gamma <= 0
             or quote.theta is None or quote.theta >= 0
@@ -266,9 +269,12 @@ def select_option_contract(
             continue
         eligible.append((contract, quote))
     if not eligible:
-        return ContractSelection(None, None, f"no fresh liquid {option_type} contract within premium/Greek limits ({rejected} rejected)", rejected)
+        reason = f"no fresh liquid {option_type} contract passed strict filters ({rejected} rejected)"
+        if observed_asks:
+            reason += f"; observed_ask_range=${min(observed_asks):.2f}-${max(observed_asks):.2f}"
+        return ContractSelection(None, None, reason, rejected)
     contract, quote = max(eligible, key=lambda item: (item[1].ask, item[1].ask_size, item[1].volume))
-    return ContractSelection(contract, quote, "highest ask premium within per-contract budget", rejected)
+    return ContractSelection(contract, quote, "highest premium among strict-qualified contracts", rejected)
 
 
 def select_weak_fallback_contract(
@@ -278,10 +284,10 @@ def select_weak_fallback_contract(
     config: BotConfig,
     now: datetime,
     *,
-    budget_usd: Decimal,
+    budget_usd: Decimal | None = None,
 ) -> ContractSelection:
-    """Relax nonessential Greek/spread filters, keeping price and quote safety gates."""
-    per_share_budget = budget_usd / OPTION_MULTIPLIER
+    """Relax nonessential Greek/spread filters, optionally capped by a caller."""
+    per_share_budget = budget_usd / OPTION_MULTIPLIER if budget_usd is not None else None
     eligible: list[tuple[OptionContract, OptionQuote, float]] = []
     rejection_counts: dict[str, int] = {}
     observed_asks: list[Decimal] = []
@@ -307,7 +313,7 @@ def select_weak_fallback_contract(
         if quote.bid_size <= 0 or quote.ask_size <= 0:
             reject("no_displayed_depth")
             continue
-        if quote.ask > per_share_budget:
+        if per_share_budget is not None and quote.ask > per_share_budget:
             reject("ask_over_budget")
             continue
         if not _quote_fresh(quote, now, config.spy_option_max_quote_delay_minutes):
@@ -497,26 +503,6 @@ class SPY0DTEOptionsLoop:
         temp.write_text(json.dumps(self._performance, indent=2), encoding="utf-8")
         temp.replace(self.performance_path)
 
-    def _apply_starting_equity_override(self) -> None:
-        target = Decimal(str(self.config.spy_option_starting_equity_override_usd))
-        if target <= 0 or self._state.get("status") in ("OPEN", "ENTRY_PENDING", "EXIT_PENDING"):
-            return
-        target = target.quantize(Decimal("0.01"))
-        applied = _decimal(self._performance, "equity_override_applied_usd")
-        if applied == target:
-            return
-        previous = _decimal(self._performance, "strategy_equity_usd")
-        self._performance["strategy_equity_usd"] = str(target)
-        self._performance["initial_budget_usd"] = str(target)
-        self._performance["equity_override_applied_usd"] = str(target)
-        self._performance["capital_adjustments"].append({
-            "applied_at": self._now().isoformat(),
-            "previous_equity_usd": str(previous) if previous is not None else None,
-            "new_equity_usd": str(target),
-            "reason": "configured one-time starting equity override",
-        })
-        self._save_performance()
-
     def _effective_config(self) -> BotConfig:
         adaptive = self._performance.get("adaptive", {})
         overrides = {
@@ -525,16 +511,6 @@ class SPY0DTEOptionsLoop:
             if name in adaptive
         }
         return replace(self.config, **overrides) if overrides else self.config
-
-    def _strategy_budget(self, buying_power: Decimal) -> Decimal:
-        self._apply_starting_equity_override()
-        equity = _decimal(self._performance, "strategy_equity_usd")
-        if equity is None:
-            equity = min(Decimal(str(self.config.spy_option_initial_budget_usd)), buying_power)
-            self._performance["strategy_equity_usd"] = str(equity.quantize(Decimal("0.01")))
-            self._performance["initial_budget_usd"] = self._performance["strategy_equity_usd"]
-            self._save_performance()
-        return max(Decimal("0"), min(equity, buying_power))
 
     def _review_performance(self) -> None:
         trades = self._performance["trades"]
@@ -647,14 +623,12 @@ class SPY0DTEOptionsLoop:
         bear = confirm_candidate_bearish(self.broker, SPY_SYMBOL, min_score=active_config.spy_option_weak_floor, market_news=self._market_news)
         return decide_option_direction(bull, bear, active_config, trend=trend_direction(self.broker, SPY_SYMBOL))
 
-    def _list_contracts(self, expiry: str, spot: float) -> list[OptionContract]:
+    def _list_contracts(self, expiry: str) -> list[OptionContract]:
         found: dict[str, OptionContract] = {}
         key = None
         for page in range(20):
             response = self.broker.get_option_contracts(
                 SPY_SYMBOL, expiry,
-                strike_min=max(0.01, spot - self.config.spy_option_max_strike_distance),
-                strike_max=spot + self.config.spy_option_max_strike_distance,
                 pagination_key=key,
             )
             if getattr(response, "status_code", 200) != 200:
@@ -677,28 +651,20 @@ class SPY0DTEOptionsLoop:
         if buying_power is None or buying_power <= 0:
             summary.events.append(LoopEvent("spy_option_sizing_blocked", SPY_SYMBOL, "buying power unavailable"))
             return
-        budget = self._strategy_budget(buying_power)
-        if budget <= 0:
-            summary.events.append(LoopEvent("spy_option_sizing_blocked", SPY_SYMBOL, "strategy equity is depleted"))
-            return
-        underlying = self.broker.get_latest_quote(SPY_SYMBOL)
-        if underlying is None or underlying.last <= 0:
-            summary.events.append(LoopEvent("spy_underlying_unavailable", SPY_SYMBOL, "SPY quote unavailable"))
-            return
         expiry = now.date().isoformat()
-        contracts = self._list_contracts(expiry, float(underlying.last))
+        contracts = self._list_contracts(expiry)
         if not contracts:
-            summary.events.append(LoopEvent("spy_option_chain_empty", SPY_SYMBOL, "no same-day SPY contracts in scan range"))
+            summary.events.append(LoopEvent("spy_option_chain_empty", SPY_SYMBOL, "no same-day SPY contracts returned"))
             return
         quote_map = self.broker.get_option_snapshots([contract.option_symbol for contract in contracts])
         active_config = self._effective_config()
         selection = select_option_contract(
-            contracts, quote_map, signal.option_type, active_config, now, budget_usd=budget,
+            contracts, quote_map, signal.option_type, active_config, now,
         )
         used_weak_fallback = False
         if selection.contract is None and signal.regime.startswith("weak_"):
             selection = select_weak_fallback_contract(
-                contracts, quote_map, signal.option_type, active_config, now, budget_usd=budget,
+                contracts, quote_map, signal.option_type, active_config, now,
             )
             used_weak_fallback = selection.contract is not None
             if used_weak_fallback:
@@ -710,7 +676,7 @@ class SPY0DTEOptionsLoop:
             summary.events.append(LoopEvent("spy_option_rejected", SPY_SYMBOL, selection.reason))
             return
         unit_cost = selection.quote.ask * OPTION_MULTIPLIER
-        spendable = min(budget * Decimal(str(self.config.spy_option_buying_power_fraction)), buying_power)
+        spendable = buying_power * Decimal(str(self.config.spy_option_buying_power_fraction))
         quantity = int((spendable / unit_cost).to_integral_value(rounding=ROUND_DOWN))
         visible_ask_contracts = int(selection.quote.ask_size.to_integral_value(rounding=ROUND_DOWN))
         quantity = min(quantity, visible_ask_contracts)
@@ -726,7 +692,7 @@ class SPY0DTEOptionsLoop:
             "weak_fallback_used": used_weak_fallback,
             "entry_filled_quantity": 0, "exit_filled_quantity": 0,
             "entry_average_price": None, "requested_quantity": quantity,
-            "strategy_budget_at_entry_usd": str(budget),
+            "buying_power_at_entry_usd": str(buying_power),
             "entry_quoted_ask": str(selection.quote.ask),
             "entry_quote_volume": str(selection.quote.volume),
             "entry_delta": selection.quote.delta,
@@ -751,8 +717,9 @@ class SPY0DTEOptionsLoop:
         summary.entries.append(order)
         summary.events.append(LoopEvent(
             "spy_option_entry", selection.contract.option_symbol,
-            f"MARKET BUY {quantity} {selection.contract.option_type}; ask {selection.quote.ask}, "
-            f"est. ${unit_cost * quantity:,.2f} premium, signal={signal.regime}",
+            f"MARKET BUY {quantity} {selection.contract.option_type}; ask=${selection.quote.ask:.2f}/share "
+            f"premium/contract=${unit_cost:,.2f}, estimated_total=${unit_cost * quantity:,.2f}, "
+            f"buying_power=${buying_power:,.2f}, selection={selection.reason}, signal={signal.regime}",
         ))
 
     def _reconcile_order(self, summary: LoopSummary) -> None:
@@ -928,7 +895,7 @@ class SPY0DTEOptionsLoop:
             "expiration": self._state.get("expiration"),
             "option_type": self._state.get("option_type"),
             "signal_regime": self._state.get("signal_regime"),
-            "strategy_budget_at_entry_usd": self._state.get("strategy_budget_at_entry_usd"),
+            "buying_power_at_entry_usd": self._state.get("buying_power_at_entry_usd"),
             "entry_quoted_ask": self._state.get("entry_quoted_ask"),
             "entry_quote_volume": self._state.get("entry_quote_volume"),
             "entry_delta": self._state.get("entry_delta"),

@@ -68,7 +68,10 @@ def test_selects_highest_ask_under_one_dollar_with_liquidity_and_greeks() -> Non
         contracts[2].option_symbol: _snapshot(contracts[2].option_symbol, "0.95", bid="0.90"),
     }
 
-    result = select_option_contract(contracts, snapshots, "CALL", BotConfig(), datetime(2026, 10, 28, 11, 0, tzinfo=EASTERN))
+    result = select_option_contract(
+        contracts, snapshots, "CALL", BotConfig(),
+        datetime(2026, 10, 28, 11, 0, tzinfo=EASTERN), budget_usd=Decimal("100"),
+    )
 
     assert result.contract == contracts[2]
     assert result.quote.ask == Decimal("0.95")
@@ -92,6 +95,20 @@ def test_dynamic_budget_selects_most_expensive_affordable_contract() -> None:
 
     assert selection_130.contract == contracts[1]
     assert selection_80.contract == contracts[0]
+
+
+def test_default_selector_does_not_cap_premium_by_reporting_baseline() -> None:
+    contract = _contract("SPY261028C00680000", "CALL")
+    snapshot = _snapshot(contract.option_symbol, "2.50", bid="2.45")
+
+    selection = select_option_contract(
+        [contract], {contract.option_symbol: snapshot}, "CALL",
+        BotConfig(spy_option_initial_budget_usd=1),
+        datetime(2026, 10, 28, 11, 0, tzinfo=EASTERN),
+    )
+
+    assert selection.contract == contract
+    assert selection.quote.ask == Decimal("2.50")
 
 
 def test_weak_fallback_relaxes_greeks_and_spread_but_keeps_hard_quote_gates() -> None:
@@ -135,7 +152,7 @@ def test_legacy_budget_setting_seeds_new_strategy_budget(tmp_path) -> None:
     assert load_bot_config(config_file).spy_option_initial_budget_usd == 130
 
 
-def test_bot_config_loads_equity_override_and_strike_width(tmp_path) -> None:
+def test_bot_config_ignores_removed_equity_override_and_strike_window(tmp_path) -> None:
     config_file = tmp_path / "bot_config.json"
     config_file.write_text(
         '{"spy_option_starting_equity_override_usd":200,"spy_option_max_strike_distance":50}',
@@ -144,8 +161,8 @@ def test_bot_config_loads_equity_override_and_strike_width(tmp_path) -> None:
 
     config = load_bot_config(config_file)
 
-    assert config.spy_option_starting_equity_override_usd == 200
-    assert config.spy_option_max_strike_distance == 50
+    assert not hasattr(config, "spy_option_starting_equity_override_usd")
+    assert not hasattr(config, "spy_option_max_strike_distance")
 
 
 def test_contract_selector_rejects_missing_greeks_depth_and_stale_quotes() -> None:

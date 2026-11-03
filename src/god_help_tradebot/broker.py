@@ -534,8 +534,8 @@ class WebullSandboxBroker:
         underlying: str,
         expiration_date: str,
         *,
-        strike_min: float,
-        strike_max: float,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
         pagination_key: str | None = None,
     ) -> Any:
         """List sandbox option contracts for one underlying and expiration."""

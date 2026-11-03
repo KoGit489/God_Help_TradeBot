@@ -35,7 +35,7 @@ class _Broker:
     def get_latest_quote(self, symbol):
         return Quote("SPY", Decimal("600.00"), Decimal("600.01"), Decimal("600.00"))
 
-    def get_option_contracts(self, underlying, expiry, *, strike_min, strike_max, pagination_key=None):
+    def get_option_contracts(self, underlying, expiry, *, strike_min=None, strike_max=None, pagination_key=None):
         return _Response({"data": [{
             "symbol": "SPY261028C00600000", "expiration_date": expiry,
             "strike_price": "600", "option_type": "CALL", "multiplier": "100",
@@ -91,7 +91,7 @@ def test_spy_options_loop_submits_max_affordable_market_contracts(tmp_path, monk
     assert loop._state["status"] == "ENTRY_PENDING"
 
 
-def test_default_strategy_budget_is_independent_of_larger_account_balance(tmp_path):
+def test_entry_sizing_uses_buying_power_not_persisted_equity(tmp_path):
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
     broker = _Broker(_option_quote())
     loop = SPY0DTEOptionsLoop(
@@ -102,17 +102,35 @@ def test_default_strategy_budget_is_independent_of_larger_account_balance(tmp_pa
 
     loop.run_once()
 
-    assert broker.orders[0][1] == 1
-    assert loop._performance["strategy_equity_usd"] == "100.00"
+    assert broker.orders[0][1] == 111
+    assert loop._performance["strategy_equity_usd"] is None
 
 
-def test_default_contract_scan_uses_fifty_dollar_strike_range(tmp_path):
+def test_entry_logs_premium_and_sizes_above_old_reporting_baseline(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    broker = _Broker(_option_quote(bid="2.45", ask="2.50"))
+    loop = SPY0DTEOptionsLoop(
+        broker, BotConfig(strategy_mode="spy_0dte_options", spy_option_initial_budget_usd=1),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+    )
+    loop._evaluate_signal = lambda: OptionSignal("CALL", "strong_bullish", "test", .82, .30, 4, "up")
+
+    summary = loop.run_once()
+
+    assert broker.orders[0][1] == 40
+    entry = next(event for event in summary.events if event.kind == "spy_option_entry")
+    assert "ask=$2.50/share" in entry.detail
+    assert "premium/contract=$250.00" in entry.detail
+    assert "estimated_total=$10,000.00" in entry.detail
+
+
+def test_contract_scan_requests_all_same_day_strikes(tmp_path):
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
     broker = _Broker(_option_quote())
     requested_ranges = []
     original = broker.get_option_contracts
 
-    def record_range(underlying, expiry, *, strike_min, strike_max, pagination_key=None):
+    def record_range(underlying, expiry, *, strike_min=None, strike_max=None, pagination_key=None):
         requested_ranges.append((strike_min, strike_max))
         return original(
             underlying, expiry, strike_min=strike_min, strike_max=strike_max,
@@ -125,41 +143,32 @@ def test_default_contract_scan_uses_fifty_dollar_strike_range(tmp_path):
         state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
     )
 
-    loop._list_contracts(now.date().isoformat(), 600)
+    loop._list_contracts(now.date().isoformat())
 
-    assert requested_ranges == [(550, 650)]
+    assert requested_ranges == [(None, None)]
 
 
-def test_starting_equity_override_applies_once_then_preserves_compounding(tmp_path):
+def test_entry_sizing_ignores_starting_equity_and_override_ledger_values(tmp_path):
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
     state_file = tmp_path / "spy_options_state.json"
     performance_file = tmp_path / "spy_options_performance.json"
     performance_file.write_text(
-        '{"strategy_equity_usd":"100.00","trades":[],"reviews":[],"adaptive":{},"paused":false}',
+        '{"strategy_equity_usd":"1.00","trades":[],"reviews":[],"adaptive":{},"paused":false}',
         encoding="utf-8",
     )
-    config = BotConfig(
-        strategy_mode="spy_0dte_options", spy_option_starting_equity_override_usd=200,
-    )
-
+    config = BotConfig(strategy_mode="spy_0dte_options", spy_option_initial_budget_usd=1)
+    broker = _Broker(_option_quote())
     loop = SPY0DTEOptionsLoop(
-        _Broker(_option_quote()), config, state_file=state_file,
+        broker, config, state_file=state_file,
         performance_file=performance_file, now_provider=lambda: now,
     )
-    assert loop._performance["strategy_equity_usd"] == "100.00"
-    assert loop._strategy_budget(Decimal("10000")) == Decimal("200.00")
-    assert loop._performance["strategy_equity_usd"] == "200.00"
-    assert loop._performance["capital_adjustments"][0]["previous_equity_usd"] == "100.00"
-    loop._performance["strategy_equity_usd"] = "220.00"
-    loop._save_performance()
+    loop._evaluate_signal = lambda: OptionSignal("CALL", "strong_bullish", "test", .82, .30, 4, "up")
 
-    restarted = SPY0DTEOptionsLoop(
-        _Broker(_option_quote()), config, state_file=tmp_path / "next_state.json",
-        performance_file=performance_file, now_provider=lambda: now,
-    )
+    loop.run_once()
 
-    assert restarted._performance["strategy_equity_usd"] == "220.00"
-    assert len(restarted._performance["capital_adjustments"]) == 1
+    assert broker.orders[0][1] == 111
+    assert loop._performance["strategy_equity_usd"] == "1.00"
+    assert loop._state["buying_power_at_entry_usd"] == "10000"
 
 
 def test_spy_options_loop_retries_quantity_rejection_at_half_size(tmp_path, monkeypatch):

@@ -95,3 +95,25 @@ def test_buying_power_does_not_fall_back_to_net_liquidation_value():
     payload["account_currency_assets"][0].pop("buying_power")
     payload["account_currency_assets"][0].pop("cash_balance")
     assert broker.get_buying_power() is None
+
+
+def test_option_chain_can_request_all_strikes_for_expiration():
+    broker = _broker()
+    calls = []
+    broker.session.data_client = SimpleNamespace(instrument=SimpleNamespace(
+        list_option_contracts=lambda **kwargs: calls.append(kwargs) or _Response()
+    ))
+
+    broker.get_option_contracts("SPY", "2026-10-28")
+
+    assert calls == [{
+        "category": "US_OPTION",
+        "underlying_symbols": "SPY",
+        "status": "LISTING",
+        "start_date": "2026-10-28",
+        "end_date": "2026-10-28",
+        "strike_price_gte": None,
+        "strike_price_lte": None,
+        "show_deliverables": True,
+        "pagination_key": None,
+    }]

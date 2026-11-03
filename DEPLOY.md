@@ -116,11 +116,11 @@ from pathlib import Path
 
 path = Path("bot_config.json")
 config = json.loads(path.read_text()) if path.exists() else {}
+config.pop("spy_option_starting_equity_override_usd", None)
+config.pop("spy_option_max_strike_distance", None)
 config.update({
   "strategy_mode": "spy_0dte_options",
-  "spy_option_initial_budget_usd": 200.0,
-  "spy_option_starting_equity_override_usd": 200.0,
-  "spy_option_max_strike_distance": 50.0,
+  "spy_option_buying_power_fraction": 1.0,
 })
 temp = path.with_suffix(".json.tmp")
 temp.write_text(json.dumps(config, indent=2) + "\n")
@@ -136,10 +136,9 @@ journalctl -u tradebot -n 100 --no-pager
 
 The command stops if tracked server files are dirty; untracked runtime files
 are preserved and backed up. Backups are stored outside the repository under
-`/root/tradebot-backups/`. It sets the server's one-time equity override to
-$200 and widens the strike search to ±$50. The override is applied during the
-next valid sizing attempt and recorded in the ledger; later compounding is not
-reset on service restart. Keep
+`/root/tradebot-backups/`. It removes the previous equity override and strike
+window from `bot_config.json`, and sets `spy_option_buying_power_fraction` to
+1.0. Keep
 `spy_options_performance.json` to retain compounded equity and review history.
 `spy_options_state.json` is separate same-session order recovery state; only
 archive it after confirming the sandbox has no positions or open orders.
@@ -150,22 +149,24 @@ archive it after confirming the sandbox has no positions or open orders.
   explicitly run the legacy equity strategy. Do not start options mode until
   the sandbox account is reset/flat and has no working orders.
 - The SPY paper strategy monitors from 9:25 AM ET, buys same-day SPY contracts
-  during CORE hours, and uses MARKET orders. The configured starting strategy
-  budget compounds by realized option P&L. Contract premium is `ask x 100` and
-  must fit the current budget; quantity is maximized within strategy equity,
-  buying power, visible ask size, and `spy_option_max_contracts_per_order`.
-  Market slippage can exceed the observed ask and budget.
-- The strike search spans ±`spy_option_max_strike_distance` around SPY. If
-  no contract qualifies, weak-fallback diagnostics include the observed ask
-  range; stale quotes are observations, not executable prices.
+  during CORE hours, and uses MARKET orders. It scans every listed strike for
+  that day's expiration. There is no premium cap from the historical P&L
+  ledger; quantity is maximized within spendable broker buying power,
+  `spy_option_buying_power_fraction`, visible ask size, and
+  `spy_option_max_contracts_per_order`. The default fraction is 100%, so an
+  order can use all available buying power. Market slippage can exceed the
+  observed ask; options may lose their entire premium.
+- Entry logs record ask per share, premium per contract, and estimated total
+  premium. If no contract qualifies, weak-fallback diagnostics include the
+  observed ask range; stale quotes are observations, not executable prices.
 - Strong signals use strict Greek and spread qualification. If that finds no
   contract for a weak directional signal, a second-stage search allows a
   configurable spread up to 45% and missing secondary Greeks or reported
   day-volume. It still requires a same-day contract, fresh quote, correctly
-  signed delta, positive displayed bid/ask depth, and ask premium within the
-  strategy budget. This makes weak-signal entries more likely, not guaranteed:
-  no order is submitted when those hard market-data or affordability checks
-  fail, and market execution may still reject or fail to fill.
+  signed delta, and positive displayed bid/ask depth. This makes weak-signal
+  entries more likely, not guaranteed: no order is submitted when those hard
+  market-data checks fail, and market execution may still reject or fail to
+  fill.
 - Signal thresholds and the low-conviction inverse rule are configurable.
   Signals combine SPY chart/flow/analyst/ticker-news data with broad market
   news; Greeks validate exposure/liquidity, not direction.
