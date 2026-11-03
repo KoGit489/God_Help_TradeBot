@@ -68,6 +68,8 @@ class BotConfig:
     study_auto_improve: bool = True
     # SPY paper strategy capital compounds by realized option P&L.
     spy_option_initial_budget_usd: float = 100.0
+    # Optional one-time ledger reset; zero leaves persisted equity unchanged.
+    spy_option_starting_equity_override_usd: float = 0.0
     spy_option_buying_power_fraction: float = 1.0
     spy_option_max_spread_percent: float = 20.0
     spy_option_weak_max_spread_percent: float = 45.0
@@ -77,7 +79,7 @@ class BotConfig:
     spy_option_weak_floor: float = 0.55
     spy_option_min_direction_gap: float = 0.05
     spy_option_strong_direction_gap: float = 0.15
-    spy_option_max_strike_distance: float = 25.0
+    spy_option_max_strike_distance: float = 50.0
     spy_option_min_signal_count: int = 2
     spy_option_max_quote_delay_minutes: int = 1
     spy_option_max_contracts_per_order: int = 50_000
@@ -134,6 +136,8 @@ class BotConfig:
             raise ValueError("study_target_winning_days must be at least 1")
         if self.spy_option_initial_budget_usd <= 0:
             raise ValueError("spy_option_initial_budget_usd must be positive")
+        if self.spy_option_starting_equity_override_usd < 0:
+            raise ValueError("spy_option_starting_equity_override_usd cannot be negative")
         if not 0 < self.spy_option_buying_power_fraction <= 1:
             raise ValueError("spy_option_buying_power_fraction must be in (0, 1]")
         if self.spy_option_max_spread_percent <= 0:

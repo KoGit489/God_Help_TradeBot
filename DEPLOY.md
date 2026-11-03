@@ -96,28 +96,50 @@ code update.
 ```bash
 set -e
 cd /root/God_Help_TradeBot
-if [ -n "$(git status --porcelain)" ]; then
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   echo "Server worktree is dirty; preserve/reconcile local changes before updating."
   exit 1
 fi
 systemctl stop tradebot
 backup_dir="/root/tradebot-backups/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$backup_dir"
-for file in spy_options_state.json spy_options_performance.json; do
+for file in bot_config.json spy_options_state.json spy_options_performance.json; do
   if [ -f "$file" ]; then cp -a "$file" "$backup_dir/"; fi
 done
+if [ -d data ]; then cp -a data "$backup_dir/"; fi
 git fetch origin
 git switch Prototype
 git pull --ff-only origin Prototype
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("bot_config.json")
+config = json.loads(path.read_text()) if path.exists() else {}
+config.update({
+  "strategy_mode": "spy_0dte_options",
+  "spy_option_initial_budget_usd": 200.0,
+  "spy_option_starting_equity_override_usd": 200.0,
+  "spy_option_max_strike_distance": 50.0,
+})
+temp = path.with_suffix(".json.tmp")
+temp.write_text(json.dumps(config, indent=2) + "\n")
+temp.replace(path)
+PY
 source .venv/bin/activate
 pip install .
+systemctl enable tradebot
 systemctl restart tradebot
 systemctl status --no-pager tradebot
 journalctl -u tradebot -n 100 --no-pager
 ```
 
-The command stops if the server worktree is dirty. Backups are stored outside
-the repository under `/root/tradebot-backups/`. Keep
+The command stops if tracked server files are dirty; untracked runtime files
+are preserved and backed up. Backups are stored outside the repository under
+`/root/tradebot-backups/`. It sets the server's one-time equity override to
+$200 and widens the strike search to ±$50. The override is applied during the
+next valid sizing attempt and recorded in the ledger; later compounding is not
+reset on service restart. Keep
 `spy_options_performance.json` to retain compounded equity and review history.
 `spy_options_state.json` is separate same-session order recovery state; only
 archive it after confirming the sandbox has no positions or open orders.
@@ -128,11 +150,14 @@ archive it after confirming the sandbox has no positions or open orders.
   explicitly run the legacy equity strategy. Do not start options mode until
   the sandbox account is reset/flat and has no working orders.
 - The SPY paper strategy monitors from 9:25 AM ET, buys same-day SPY contracts
-  during CORE hours, and uses MARKET orders. The default $100 starting strategy
+  during CORE hours, and uses MARKET orders. The configured starting strategy
   budget compounds by realized option P&L. Contract premium is `ask x 100` and
   must fit the current budget; quantity is maximized within strategy equity,
   buying power, visible ask size, and `spy_option_max_contracts_per_order`.
   Market slippage can exceed the observed ask and budget.
+- The strike search spans ±`spy_option_max_strike_distance` around SPY. If
+  no contract qualifies, weak-fallback diagnostics include the observed ask
+  range; stale quotes are observations, not executable prices.
 - Strong signals use strict Greek and spread qualification. If that finds no
   contract for a weak directional signal, a second-stage search allows a
   configurable spread up to 45% and missing secondary Greeks or reported

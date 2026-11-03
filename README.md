@@ -8,6 +8,8 @@ Sandbox-only Webull API bot. The default Prototype strategy is **SPY 0DTE long o
 - Uses SPY 5-minute chart patterns/trend, ticker and broad-market news, flow/analyst signals when available, and option Greeks for contract validation.
 - Strong directional consensus buys with the signal (bullish = call, bearish = put). Moderate directional consensus is inverted per the configured rule. Weak directional signals get a second-stage contract search if strict selection finds nothing.
 - Seeds a persistent options budget from `spy_option_initial_budget_usd` (default $100). After each closed trade, realized option P&L compounds that budget; the next contract's ask premium (`ask x 100`) must fit the current budget. The most expensive qualifying contract is selected, and quantity uses the maximum affordable amount, capped by current sandbox buying power, visible ask size, and the configured order limit.
+- `spy_option_starting_equity_override_usd` can reset an existing ledger once to a chosen amount; the applied amount is recorded so restarts do not undo later compounding. The deployed server can set this to $200 to raise its current $100 ledger equity.
+- Searches same-day strikes within `spy_option_max_strike_distance` of SPY (default ±$50). If no weak-fallback contract qualifies, the rejection reason includes the observed ask-price range for perspective; stale quotes are labeled as observations, not executable prices.
 - Strong signals use strict spread, Greek, and depth filters. The weak fallback allows a configured spread up to 45% and missing secondary Greeks or reported day-volume, but still requires a same-day contract, fresh quote, correctly signed delta, positive two-sided displayed depth, and premium within budget. Market orders can still slip, partially fill, or remain unfilled; no daily fill can be guaranteed.
 - Tracks one entry per session. Take-profit is +30% and stop-loss is -10% of the confirmed option premium fill, evaluated against the option's bid. The bot submits a market exit at 3:59 PM ET. The simulator may not fill an exit without bid liquidity; the state file and logs preserve that unresolved status.
 - After each five completed trades, reviews the latest five. Fewer than four wins tightens signal and spread gates one step; gates never auto-relax. If all tightening limits are reached and the target is still missed, new entries pause for manual review. The ledger persists across restarts and dates in `spy_options_performance.json`.
@@ -33,6 +35,8 @@ Useful SPY controls in `bot_config.json`:
 {
   "strategy_mode": "spy_0dte_options",
   "spy_option_initial_budget_usd": 100.0,
+  "spy_option_starting_equity_override_usd": 0.0,
+  "spy_option_max_strike_distance": 50.0,
   "spy_option_buying_power_fraction": 1.0,
   "spy_option_max_spread_percent": 20.0,
   "spy_option_weak_max_spread_percent": 45.0,

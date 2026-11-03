@@ -125,6 +125,7 @@ def test_weak_fallback_relaxes_greeks_and_spread_but_keeps_hard_quote_gates() ->
     )
     assert rejected.contract is None
     assert "stale_quote=1" in rejected.reason
+    assert "observed_ask_range=$0.90-$0.90" in rejected.reason
 
 
 def test_legacy_budget_setting_seeds_new_strategy_budget(tmp_path) -> None:
@@ -132,6 +133,19 @@ def test_legacy_budget_setting_seeds_new_strategy_budget(tmp_path) -> None:
     config_file.write_text('{"spy_option_contract_budget_usd": 130}', encoding="utf-8")
 
     assert load_bot_config(config_file).spy_option_initial_budget_usd == 130
+
+
+def test_bot_config_loads_equity_override_and_strike_width(tmp_path) -> None:
+    config_file = tmp_path / "bot_config.json"
+    config_file.write_text(
+        '{"spy_option_starting_equity_override_usd":200,"spy_option_max_strike_distance":50}',
+        encoding="utf-8",
+    )
+
+    config = load_bot_config(config_file)
+
+    assert config.spy_option_starting_equity_override_usd == 200
+    assert config.spy_option_max_strike_distance == 50
 
 
 def test_contract_selector_rejects_missing_greeks_depth_and_stale_quotes() -> None:

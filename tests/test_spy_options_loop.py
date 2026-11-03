@@ -106,6 +106,62 @@ def test_default_strategy_budget_is_independent_of_larger_account_balance(tmp_pa
     assert loop._performance["strategy_equity_usd"] == "100.00"
 
 
+def test_default_contract_scan_uses_fifty_dollar_strike_range(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    broker = _Broker(_option_quote())
+    requested_ranges = []
+    original = broker.get_option_contracts
+
+    def record_range(underlying, expiry, *, strike_min, strike_max, pagination_key=None):
+        requested_ranges.append((strike_min, strike_max))
+        return original(
+            underlying, expiry, strike_min=strike_min, strike_max=strike_max,
+            pagination_key=pagination_key,
+        )
+
+    broker.get_option_contracts = record_range
+    loop = SPY0DTEOptionsLoop(
+        broker, BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+    )
+
+    loop._list_contracts(now.date().isoformat(), 600)
+
+    assert requested_ranges == [(550, 650)]
+
+
+def test_starting_equity_override_applies_once_then_preserves_compounding(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    state_file = tmp_path / "spy_options_state.json"
+    performance_file = tmp_path / "spy_options_performance.json"
+    performance_file.write_text(
+        '{"strategy_equity_usd":"100.00","trades":[],"reviews":[],"adaptive":{},"paused":false}',
+        encoding="utf-8",
+    )
+    config = BotConfig(
+        strategy_mode="spy_0dte_options", spy_option_starting_equity_override_usd=200,
+    )
+
+    loop = SPY0DTEOptionsLoop(
+        _Broker(_option_quote()), config, state_file=state_file,
+        performance_file=performance_file, now_provider=lambda: now,
+    )
+    assert loop._performance["strategy_equity_usd"] == "100.00"
+    assert loop._strategy_budget(Decimal("10000")) == Decimal("200.00")
+    assert loop._performance["strategy_equity_usd"] == "200.00"
+    assert loop._performance["capital_adjustments"][0]["previous_equity_usd"] == "100.00"
+    loop._performance["strategy_equity_usd"] = "220.00"
+    loop._save_performance()
+
+    restarted = SPY0DTEOptionsLoop(
+        _Broker(_option_quote()), config, state_file=tmp_path / "next_state.json",
+        performance_file=performance_file, now_provider=lambda: now,
+    )
+
+    assert restarted._performance["strategy_equity_usd"] == "220.00"
+    assert len(restarted._performance["capital_adjustments"]) == 1
+
+
 def test_spy_options_loop_retries_quantity_rejection_at_half_size(tmp_path, monkeypatch):
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
     broker = _Broker(_option_quote())

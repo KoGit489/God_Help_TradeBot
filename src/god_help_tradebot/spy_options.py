@@ -284,6 +284,7 @@ def select_weak_fallback_contract(
     per_share_budget = budget_usd / OPTION_MULTIPLIER
     eligible: list[tuple[OptionContract, OptionQuote, float]] = []
     rejection_counts: dict[str, int] = {}
+    observed_asks: list[Decimal] = []
 
     def reject(reason: str) -> None:
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
@@ -298,6 +299,8 @@ def select_weak_fallback_contract(
         if quote.option_symbol != contract.option_symbol:
             reject("symbol_mismatch")
             continue
+        if quote.ask > 0:
+            observed_asks.append(quote.ask)
         if quote.bid <= 0 or quote.ask < quote.bid or quote.ask <= 0:
             reject("invalid_bid_ask")
             continue
@@ -324,6 +327,8 @@ def select_weak_fallback_contract(
         eligible.append((contract, quote, spread_pct))
     if not eligible:
         detail = ", ".join(f"{name}={count}" for name, count in sorted(rejection_counts.items())) or "no matching contracts"
+        if observed_asks:
+            detail += f"; observed_ask_range=${min(observed_asks):.2f}-${max(observed_asks):.2f}"
         return ContractSelection(
             None, None,
             f"no weak-fallback {option_type} contract passed hard gates ({detail})",
@@ -452,6 +457,7 @@ class SPY0DTEOptionsLoop:
             "strategy_equity_usd": None,
             "trades": [],
             "reviews": [],
+            "capital_adjustments": [],
             "last_reviewed_trade_count": 0,
             "adaptive": {},
             "paused": False,
@@ -468,6 +474,10 @@ class SPY0DTEOptionsLoop:
             raise RuntimeError("SPY options performance trades invalid; startup blocked")
         if not isinstance(data.get("reviews", []), list) or any(not isinstance(item, dict) for item in data.get("reviews", [])):
             raise RuntimeError("SPY options performance reviews invalid; startup blocked")
+        if not isinstance(data.get("capital_adjustments", []), list) or any(
+            not isinstance(item, dict) for item in data.get("capital_adjustments", [])
+        ):
+            raise RuntimeError("SPY options capital adjustments invalid; startup blocked")
         if not isinstance(data.get("adaptive", {}), dict) or not isinstance(data.get("paused", False), bool):
             raise RuntimeError("SPY options performance policy invalid; startup blocked")
         merged = {**defaults, **data}
@@ -487,6 +497,26 @@ class SPY0DTEOptionsLoop:
         temp.write_text(json.dumps(self._performance, indent=2), encoding="utf-8")
         temp.replace(self.performance_path)
 
+    def _apply_starting_equity_override(self) -> None:
+        target = Decimal(str(self.config.spy_option_starting_equity_override_usd))
+        if target <= 0 or self._state.get("status") in ("OPEN", "ENTRY_PENDING", "EXIT_PENDING"):
+            return
+        target = target.quantize(Decimal("0.01"))
+        applied = _decimal(self._performance, "equity_override_applied_usd")
+        if applied == target:
+            return
+        previous = _decimal(self._performance, "strategy_equity_usd")
+        self._performance["strategy_equity_usd"] = str(target)
+        self._performance["initial_budget_usd"] = str(target)
+        self._performance["equity_override_applied_usd"] = str(target)
+        self._performance["capital_adjustments"].append({
+            "applied_at": self._now().isoformat(),
+            "previous_equity_usd": str(previous) if previous is not None else None,
+            "new_equity_usd": str(target),
+            "reason": "configured one-time starting equity override",
+        })
+        self._save_performance()
+
     def _effective_config(self) -> BotConfig:
         adaptive = self._performance.get("adaptive", {})
         overrides = {
@@ -497,6 +527,7 @@ class SPY0DTEOptionsLoop:
         return replace(self.config, **overrides) if overrides else self.config
 
     def _strategy_budget(self, buying_power: Decimal) -> Decimal:
+        self._apply_starting_equity_override()
         equity = _decimal(self._performance, "strategy_equity_usd")
         if equity is None:
             equity = min(Decimal(str(self.config.spy_option_initial_budget_usd)), buying_power)

@@ -51,6 +51,7 @@ _TUNABLES = {
     "study_target_winning_days": int,
     "study_auto_improve": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "spy_option_initial_budget_usd": float,
+    "spy_option_starting_equity_override_usd": float,
     "spy_option_buying_power_fraction": float,
     "spy_option_max_spread_percent": float,
     "spy_option_weak_max_spread_percent": float,
