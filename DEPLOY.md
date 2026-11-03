@@ -165,14 +165,17 @@ archive it after confirming the sandbox has no positions or open orders.
 - Entry logs record the observed ask per share, premium per contract, and estimated total
   premium. If no contract qualifies, weak-fallback diagnostics include the
   observed ask range; stale quotes are observations, not executable prices.
-- Strong signals use strict Greek and spread qualification. If that finds no
-  contract for a weak directional signal, a second-stage search allows a
-  configurable spread up to 45% and missing secondary Greeks or reported
-  day-volume. It still requires a same-day contract, fresh quote, correctly
-  signed delta, and positive displayed bid/ask depth. This makes weak-signal
-  entries more likely, not guaranteed: no order is submitted when those hard
-  market-data checks fail, and market execution may still reject or fail to
-  fill.
+- The highest-premium qualifying contract is selected from those affordable
+  within current buying power. If the preferred side's highest-premium contract
+  is unaffordable, a cheaper same-side candidate is evaluated. Strong conviction
+  keeps that side; weak conviction flips to the opposite option type's eligible
+  contract closest in premium. The weak fallback allows a configurable spread
+  up to 45% and missing secondary Greeks or reported day-volume, but still
+  requires a same-day contract, fresh quote, correctly signed delta, and positive
+  displayed bid/ask depth. Neutral/insufficient signals abstain.
+- These rules make entries more likely, not guaranteed: no order is submitted
+  when the account cannot afford one contract or hard quote checks fail, and the
+  broker can reject or fail to fill a MARKET order.
 - Signal thresholds and the low-conviction inverse rule are configurable.
   Signals combine SPY chart/flow/analyst/ticker-news data with broad market
   news; Greeks validate exposure/liquidity, not direction.

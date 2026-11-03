@@ -94,9 +94,14 @@ def test_dynamic_budget_selects_most_expensive_affordable_contract() -> None:
 
     selection_130 = select_option_contract(contracts, snapshots, "CALL", BotConfig(), now, budget_usd=Decimal("130"))
     selection_80 = select_option_contract(contracts, snapshots, "CALL", BotConfig(), now, budget_usd=Decimal("80"))
+    similar_to_080 = select_option_contract(
+        contracts, snapshots, "CALL", BotConfig(), now,
+        budget_usd=Decimal("130"), target_ask=Decimal("0.80"),
+    )
 
     assert selection_130.contract == contracts[1]
     assert selection_80.contract == contracts[0]
+    assert similar_to_080.contract == contracts[0]
 
 
 def test_default_selector_does_not_cap_premium_by_reporting_baseline() -> None:

@@ -229,6 +229,7 @@ def select_option_contract(
     now: datetime,
     *,
     budget_usd: Decimal | None = None,
+    target_ask: Decimal | None = None,
 ) -> ContractSelection:
     """Pick the highest-premium strict-qualified contract, optionally capped by a caller."""
     per_share_budget = budget_usd / OPTION_MULTIPLIER if budget_usd is not None else None
@@ -273,8 +274,16 @@ def select_option_contract(
         if observed_asks:
             reason += f"; observed_ask_range=${min(observed_asks):.2f}-${max(observed_asks):.2f}"
         return ContractSelection(None, None, reason, rejected)
-    contract, quote = max(eligible, key=lambda item: (item[1].ask, item[1].ask_size, item[1].volume))
-    return ContractSelection(contract, quote, "highest premium among strict-qualified contracts", rejected)
+    if target_ask is None:
+        contract, quote = max(eligible, key=lambda item: (item[1].ask, item[1].ask_size, item[1].volume))
+        reason = "highest premium among strict-qualified contracts"
+    else:
+        contract, quote = min(
+            eligible,
+            key=lambda item: (abs(item[1].ask - target_ask), -item[1].ask, -item[1].ask_size, -item[1].volume),
+        )
+        reason = f"closest eligible premium to ${target_ask:.2f}/share"
+    return ContractSelection(contract, quote, reason, rejected)
 
 
 def select_weak_fallback_contract(
@@ -285,6 +294,7 @@ def select_weak_fallback_contract(
     now: datetime,
     *,
     budget_usd: Decimal | None = None,
+    target_ask: Decimal | None = None,
 ) -> ContractSelection:
     """Relax nonessential Greek/spread filters, optionally capped by a caller."""
     per_share_budget = budget_usd / OPTION_MULTIPLIER if budget_usd is not None else None
@@ -340,10 +350,19 @@ def select_weak_fallback_contract(
             f"no weak-fallback {option_type} contract passed hard gates ({detail})",
             sum(rejection_counts.values()),
         )
-    contract, quote, spread_pct = max(
-        eligible,
-        key=lambda item: (item[1].ask, -item[2], item[1].ask_size, item[1].volume),
-    )
+    if target_ask is None:
+        contract, quote, spread_pct = max(
+            eligible,
+            key=lambda item: (item[1].ask, -item[2], item[1].ask_size, item[1].volume),
+        )
+    else:
+        contract, quote, spread_pct = min(
+            eligible,
+            key=lambda item: (
+                abs(item[1].ask - target_ask), -item[1].ask, item[2],
+                -item[1].ask_size, -item[1].volume,
+            ),
+        )
     return ContractSelection(
         contract, quote,
         f"weak-signal fallback accepted with {spread_pct:.1f}% spread",
@@ -677,23 +696,55 @@ class SPY0DTEOptionsLoop:
             return
         quote_map = self.broker.get_option_snapshots([contract.option_symbol for contract in contracts])
         active_config = self._effective_config()
-        selection = select_option_contract(
-            contracts, quote_map, signal.option_type, active_config, now, budget_usd=spendable,
-        )
-        used_weak_fallback = False
-        if selection.contract is None and signal.regime.startswith("weak_"):
-            selection = select_weak_fallback_contract(
-                contracts, quote_map, signal.option_type, active_config, now, budget_usd=spendable,
+
+        def find_candidate(option_type: str, budget: Decimal | None, target_ask: Decimal | None = None):
+            candidate = select_option_contract(
+                contracts, quote_map, option_type, active_config, now,
+                budget_usd=budget, target_ask=target_ask,
             )
-            used_weak_fallback = selection.contract is not None
-            if used_weak_fallback:
-                summary.events.append(LoopEvent(
-                    "spy_option_weak_fallback", SPY_SYMBOL,
-                    f"strict filters found no contract; {selection.reason}",
-                ))
+            used_fallback = False
+            if candidate.contract is None and signal.regime.startswith("weak_"):
+                candidate = select_weak_fallback_contract(
+                    contracts, quote_map, option_type, active_config, now,
+                    budget_usd=budget, target_ask=target_ask,
+                )
+                used_fallback = candidate.contract is not None
+            return candidate, used_fallback
+
+        unbounded_best, _ = find_candidate(signal.option_type, None)
+        selection, used_weak_fallback = find_candidate(signal.option_type, spendable)
         if selection.contract is None or selection.quote is None:
             summary.events.append(LoopEvent("spy_option_rejected", SPY_SYMBOL, selection.reason))
             return
+        if used_weak_fallback:
+            summary.events.append(LoopEvent(
+                "spy_option_weak_fallback", SPY_SYMBOL,
+                f"strict filters found no {signal.option_type}; {selection.reason}",
+            ))
+        if (
+            unbounded_best.contract is not None
+            and unbounded_best.quote is not None
+            and unbounded_best.quote.ask * OPTION_MULTIPLIER > spendable
+            and signal.regime.startswith("weak_")
+        ):
+            opposite_type = "PUT" if signal.option_type == "CALL" else "CALL"
+            flipped, flipped_weak = find_candidate(
+                opposite_type, spendable, target_ask=selection.quote.ask,
+            )
+            if flipped.contract is None or flipped.quote is None:
+                summary.events.append(LoopEvent(
+                    "spy_option_affordability_flip_rejected", SPY_SYMBOL,
+                    f"preferred {signal.option_type} was unaffordable and conviction was weak; "
+                    f"no similar-priced affordable {opposite_type} passed filters: {flipped.reason}",
+                ))
+                return
+            summary.events.append(LoopEvent(
+                "spy_option_affordability_flip", SPY_SYMBOL,
+                f"best {signal.option_type} ask ${unbounded_best.quote.ask:.2f} exceeded spendable funds; "
+                f"weak conviction flipped to {opposite_type} near ${flipped.quote.ask:.2f}/share",
+            ))
+            selection = flipped
+            used_weak_fallback = used_weak_fallback or flipped_weak
         unit_cost = selection.quote.ask * OPTION_MULTIPLIER
         quantity = int((spendable / unit_cost).to_integral_value(rounding=ROUND_DOWN))
         if quantity < 1:

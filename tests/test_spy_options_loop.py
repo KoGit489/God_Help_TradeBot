@@ -323,6 +323,51 @@ def test_weak_signal_uses_relaxed_contract_fallback_when_strict_selector_rejects
     assert any(event.kind == "spy_option_weak_fallback" for event in summary.events)
 
 
+@pytest.mark.parametrize(
+    "regime, expected_symbol, expected_flip",
+    [
+        ("strong_bullish", "SPY261028C00601000", False),
+        ("weak_bearish_fade", "SPY261028P00600000", True),
+    ],
+)
+def test_unaffordable_top_contract_uses_conviction_to_select_affordable_side(
+    tmp_path, regime, expected_symbol, expected_flip,
+):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    contracts = [
+        OptionContract("SPY261028C00602000", now.date().isoformat(), Decimal("602"), "CALL"),
+        OptionContract("SPY261028C00601000", now.date().isoformat(), Decimal("601"), "CALL"),
+        OptionContract("SPY261028P00600000", now.date().isoformat(), Decimal("600"), "PUT"),
+    ]
+    quote_map = {
+        contracts[0].option_symbol: _option_quote(
+            symbol=contracts[0].option_symbol, bid="1.45", ask="1.50", delta="0.30",
+        ),
+        contracts[1].option_symbol: _option_quote(
+            symbol=contracts[1].option_symbol, bid="0.85", ask="0.90", delta="0.30",
+        ),
+        contracts[2].option_symbol: _option_quote(
+            symbol=contracts[2].option_symbol, bid="0.83", ask="0.88", delta="-0.30", rho="-0.001",
+        ),
+    }
+    broker = _Broker(quote_map[contracts[0].option_symbol])
+    broker.get_buying_power = lambda: Decimal("100")
+    broker.get_option_snapshots = lambda symbols: quote_map
+    loop = SPY0DTEOptionsLoop(
+        broker, BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+    )
+    loop._list_contracts = lambda expiry: contracts
+    loop._evaluate_signal = lambda: OptionSignal(
+        "CALL", regime, "affordability fallback test", .72, .40, 4, "up",
+    )
+
+    summary = loop.run_once()
+
+    assert broker.orders[0][0] == expected_symbol
+    assert any(event.kind == "spy_option_affordability_flip" for event in summary.events) is expected_flip
+
+
 def test_strong_signal_does_not_use_weak_contract_fallback(tmp_path):
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
     broker = _Broker(_option_quote(bid="0.60", ask="0.90", rho=None, imp_vol=None))
