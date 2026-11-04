@@ -21,6 +21,10 @@ from .worldnews import fetch_market_news
 SPY_SYMBOL = "SPY"
 OPTION_MULTIPLIER = Decimal("100")
 STATE_FILE = Path("spy_options_state.json")
+PERSISTED_OPTION_QUOTE_FIELDS = (
+    "entry_quoted_ask", "entry_quote_volume", "entry_delta", "entry_quote_time",
+    "entry_quote_bid", "entry_bid_size", "entry_ask_size",
+)
 logger = logging.getLogger("god_help_tradebot")
 
 
@@ -188,14 +192,9 @@ def summarize_option_snapshot_health(
         if quote.bid > 0 and quote.ask >= quote.bid and quote.ask > 0
         and quote.bid_size > 0 and quote.ask_size > 0
     ]
-    asks = [quote.ask for quote in quotes if quote.ask > 0]
-    delays = [quote.delay_minutes for quote in quotes if quote.delay_minutes is not None]
-    ask_range = f"${min(asks):.2f}-${max(asks):.2f}" if asks else "none"
-    max_reported_delay = f"{max(delays):.2f}m" if delays else "unreported"
     return (
         f"snapshots={len(snapshots)} parsed={len(quotes)} fresh={len(fresh)} "
-        f"two_sided={len(two_sided)} max_reported_delay={max_reported_delay} "
-        f"observed_ask_range={ask_range}"
+        f"two_sided={len(two_sided)}"
     )
 
 
@@ -258,7 +257,6 @@ def select_option_contract(
     per_share_budget = budget_usd / OPTION_MULTIPLIER if budget_usd is not None else None
     eligible: list[tuple[OptionContract, OptionQuote]] = []
     rejected = 0
-    observed_asks: list[Decimal] = []
     for contract in contracts:
         if contract.expiration_date != now.date().isoformat() or contract.option_type != option_type:
             continue
@@ -266,8 +264,6 @@ def select_option_contract(
         if quote is None:
             rejected += 1
             continue
-        if quote.ask > 0:
-            observed_asks.append(quote.ask)
         if (
             quote.option_symbol != contract.option_symbol
             or quote.bid <= 0 or quote.ask < quote.bid or quote.ask <= 0
@@ -294,8 +290,6 @@ def select_option_contract(
         eligible.append((contract, quote))
     if not eligible:
         reason = f"no fresh liquid {option_type} contract passed strict filters ({rejected} rejected)"
-        if observed_asks:
-            reason += f"; observed_ask_range=${min(observed_asks):.2f}-${max(observed_asks):.2f}"
         return ContractSelection(None, None, reason, rejected)
     if target_ask is None:
         contract, quote = max(eligible, key=lambda item: (item[1].ask, item[1].ask_size, item[1].volume))
@@ -305,7 +299,7 @@ def select_option_contract(
             eligible,
             key=lambda item: (abs(item[1].ask - target_ask), -item[1].ask, -item[1].ask_size, -item[1].volume),
         )
-        reason = f"closest eligible premium to ${target_ask:.2f}/share"
+        reason = "closest eligible premium to reference price"
     return ContractSelection(contract, quote, reason, rejected)
 
 
@@ -323,7 +317,6 @@ def select_weak_fallback_contract(
     per_share_budget = budget_usd / OPTION_MULTIPLIER if budget_usd is not None else None
     eligible: list[tuple[OptionContract, OptionQuote, float]] = []
     rejection_counts: dict[str, int] = {}
-    observed_asks: list[Decimal] = []
 
     def reject(reason: str) -> None:
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
@@ -338,8 +331,6 @@ def select_weak_fallback_contract(
         if quote.option_symbol != contract.option_symbol:
             reject("symbol_mismatch")
             continue
-        if quote.ask > 0:
-            observed_asks.append(quote.ask)
         if quote.bid <= 0 or quote.ask < quote.bid or quote.ask <= 0:
             reject("invalid_bid_ask")
             continue
@@ -366,8 +357,6 @@ def select_weak_fallback_contract(
         eligible.append((contract, quote, spread_pct))
     if not eligible:
         detail = ", ".join(f"{name}={count}" for name, count in sorted(rejection_counts.items())) or "no matching contracts"
-        if observed_asks:
-            detail += f"; observed_ask_range=${min(observed_asks):.2f}-${max(observed_asks):.2f}"
         return ContractSelection(
             None, None,
             f"no weak-fallback {option_type} contract passed hard gates ({detail})",
@@ -388,7 +377,7 @@ def select_weak_fallback_contract(
         )
     return ContractSelection(
         contract, quote,
-        f"weak-signal fallback accepted with {spread_pct:.1f}% spread",
+        "weak-signal fallback accepted under relaxed spread gate",
         sum(rejection_counts.values()),
     )
 
@@ -445,6 +434,7 @@ class SPY0DTEOptionsLoop:
         self._last_signal_log_at: datetime | None = None
         self._state = self._load_state()
         self._performance = self._load_performance()
+        self._scrub_persisted_option_quote_values()
         self._effective_config()
         if not self._state and any(position.quantity for position in broker.get_positions().values()):
             raise RuntimeError("Sandbox positions remain but no SPY option recovery state; startup blocked")
@@ -568,6 +558,19 @@ class SPY0DTEOptionsLoop:
         temp = self.performance_path.with_suffix(self.performance_path.suffix + ".tmp")
         temp.write_text(json.dumps(self._performance, indent=2), encoding="utf-8")
         temp.replace(self.performance_path)
+
+    def _scrub_persisted_option_quote_values(self) -> None:
+        state_changed = False
+        for field in PERSISTED_OPTION_QUOTE_FIELDS:
+            state_changed = self._state.pop(field, None) is not None or state_changed
+        performance_changed = False
+        for trade in self._performance.get("trades", []):
+            for field in PERSISTED_OPTION_QUOTE_FIELDS:
+                performance_changed = trade.pop(field, None) is not None or performance_changed
+        if state_changed:
+            self._save_state()
+        if performance_changed:
+            self._save_performance()
 
     def _effective_config(self) -> BotConfig:
         adaptive = self._performance.get("adaptive", {})
@@ -821,8 +824,8 @@ class SPY0DTEOptionsLoop:
                 return
             summary.events.append(LoopEvent(
                 "spy_option_affordability_flip", SPY_SYMBOL,
-                f"best {signal.option_type} ask ${unbounded_best.quote.ask:.2f} exceeded spendable funds; "
-                f"weak conviction flipped to {opposite_type} near ${flipped.quote.ask:.2f}/share",
+                f"best {signal.option_type} contract was unaffordable; "
+                f"weak conviction flipped to {opposite_type} at a similar premium",
             ))
             selection = flipped
             used_weak_fallback = used_weak_fallback or flipped_weak
@@ -844,9 +847,6 @@ class SPY0DTEOptionsLoop:
             "entry_average_price": None, "requested_quantity": quantity,
             "buying_power_at_entry_usd": str(buying_power),
             "selection_timestamp": selection_time.isoformat(),
-            "entry_quoted_ask": str(selection.quote.ask),
-            "entry_quote_volume": str(selection.quote.volume),
-            "entry_delta": selection.quote.delta,
             "pending_order_id": client_id, "pending_order_role": "ENTRY", "pending_order_polls": 0,
         })
         self._save_state()
@@ -900,8 +900,7 @@ class SPY0DTEOptionsLoop:
         summary.entries.append(order)
         summary.events.append(LoopEvent(
             "spy_option_entry", selection.contract.option_symbol,
-            f"MARKET BUY {quantity} {selection.contract.option_type}; quoted ask=${selection.quote.ask:.2f}/share "
-            f"premium/contract=${unit_cost:,.2f}, estimated_total=${unit_cost * quantity:,.2f}, "
+            f"MARKET BUY {quantity} {selection.contract.option_type}; "
             f"buying_power=${buying_power:,.2f}, selection={selection.reason}, signal={signal.regime}",
         ))
 
@@ -1041,7 +1040,7 @@ class SPY0DTEOptionsLoop:
             position_intent="SELL_TO_CLOSE", client_order_id=client_id,
         )
         summary.exits.append(order)
-        summary.events.append(LoopEvent("spy_option_exit", option_symbol, f"MARKET SELL {quantity} ({reason}) at bid ${quote.bid:.2f}"))
+        summary.events.append(LoopEvent("spy_option_exit", option_symbol, f"MARKET SELL {quantity} ({reason})"))
 
     def _clear_pending(self) -> None:
         for key in ("pending_order_id", "pending_order_role", "pending_order_polls", "pending_order_filled_seen", "pending_order_avg_price", "pending_base_exit_filled"):
@@ -1080,9 +1079,6 @@ class SPY0DTEOptionsLoop:
             "option_type": self._state.get("option_type"),
             "signal_regime": self._state.get("signal_regime"),
             "buying_power_at_entry_usd": self._state.get("buying_power_at_entry_usd"),
-            "entry_quoted_ask": self._state.get("entry_quoted_ask"),
-            "entry_quote_volume": self._state.get("entry_quote_volume"),
-            "entry_delta": self._state.get("entry_delta"),
             "entry_average_premium": str(entry),
             "exit_average_premium": str(exit_avg),
             "contracts": total_exit_qty,

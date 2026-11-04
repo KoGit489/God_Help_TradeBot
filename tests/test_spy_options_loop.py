@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -109,7 +110,7 @@ def test_entry_sizing_uses_buying_power_not_persisted_equity(tmp_path):
     assert loop._performance["strategy_equity_usd"] is None
 
 
-def test_entry_logs_premium_and_sizes_above_old_reporting_baseline(tmp_path):
+def test_entry_log_keeps_order_details_without_source_quote_values(tmp_path):
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
     broker = _Broker(_option_quote(bid="2.45", ask="2.50"))
     loop = SPY0DTEOptionsLoop(
@@ -123,9 +124,14 @@ def test_entry_logs_premium_and_sizes_above_old_reporting_baseline(tmp_path):
     assert broker.orders[0][1] == 40
     entry = next(event for event in summary.events if event.kind == "spy_option_entry")
     assert "MARKET BUY" in entry.detail
-    assert "quoted ask=$2.50/share" in entry.detail
-    assert "premium/contract=$250.00" in entry.detail
-    assert "estimated_total=$10,000.00" in entry.detail
+    assert "buying_power=$10,000.00" in entry.detail
+    assert "strong_bullish" in entry.detail
+    assert "$2.50" not in entry.detail
+    assert "premium/contract" not in entry.detail
+    assert "estimated_total" not in entry.detail
+    assert not any(key in loop._state for key in (
+        "entry_quoted_ask", "entry_quote_volume", "entry_delta",
+    ))
 
 
 def test_snapshot_time_after_cycle_start_is_checked_against_post_fetch_clock(tmp_path):
@@ -533,6 +539,41 @@ def test_partial_exit_notional_uses_cumulative_average_fill(tmp_path):
     assert Decimal(loop._state["exit_notional"]) == Decimal("250.00")
 
 
+def test_startup_scrubs_legacy_source_quotes_but_keeps_fill_pnl(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    state_file = tmp_path / "spy_options_state.json"
+    performance_file = tmp_path / "spy_options_performance.json"
+    quote_fields = {
+        "entry_quoted_ask": "2.50",
+        "entry_quote_volume": "120",
+        "entry_delta": 0.30,
+        "entry_quote_time": "2026-10-28T14:00:00Z",
+    }
+    state_file.write_text(json.dumps({
+        "session_date": now.date().isoformat(), "status": "SCANNING", **quote_fields,
+    }), encoding="utf-8")
+    performance_file.write_text(json.dumps({
+        "strategy_equity_usd": "100.00",
+        "trades": [{
+            "trade_id": "old", "realized_pnl_usd": "5.00",
+            "entry_average_premium": "2.40", **quote_fields,
+        }],
+        "reviews": [], "adaptive": {}, "paused": False,
+    }), encoding="utf-8")
+
+    SPY0DTEOptionsLoop(
+        _Broker(_option_quote()), BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=state_file, performance_file=performance_file, now_provider=lambda: now,
+    )
+
+    saved_state = json.loads(state_file.read_text(encoding="utf-8"))
+    saved_performance = json.loads(performance_file.read_text(encoding="utf-8"))
+    assert not any(field in saved_state for field in quote_fields)
+    assert not any(field in saved_performance["trades"][0] for field in quote_fields)
+    assert saved_performance["trades"][0]["entry_average_premium"] == "2.40"
+    assert saved_performance["trades"][0]["realized_pnl_usd"] == "5.00"
+
+
 def test_unpriced_partial_exit_does_not_advance_reconciled_quantity(tmp_path):
     loop = SPY0DTEOptionsLoop(
         _Broker(_option_quote()), BotConfig(strategy_mode="spy_0dte_options"),
@@ -567,6 +608,12 @@ def test_realized_pnl_compounds_budget_and_persists_five_trade_adjustment(tmp_pa
 
     summary = LoopSummary()
     loop._log_realized_pnl(summary)
+    recorded_trade = loop._performance["trades"][-1]
+    assert recorded_trade["entry_average_premium"] == "0.90"
+    assert recorded_trade["realized_pnl_usd"] == "-10.00"
+    assert not any(field in recorded_trade for field in (
+        "entry_quoted_ask", "entry_quote_volume", "entry_delta", "entry_quote_time",
+    ))
     restored = SPY0DTEOptionsLoop(
         _Broker(_option_quote()), BotConfig(strategy_mode="spy_0dte_options"),
         state_file=tmp_path / "restored_state.json", performance_file=performance_file,

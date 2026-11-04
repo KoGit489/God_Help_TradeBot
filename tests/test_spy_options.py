@@ -150,7 +150,7 @@ def test_weak_fallback_relaxes_greeks_and_spread_but_keeps_hard_quote_gates() ->
     )
     assert rejected.contract is None
     assert "stale_quote=1" in rejected.reason
-    assert "observed_ask_range=$0.90-$0.90" in rejected.reason
+    assert "$0.90" not in rejected.reason
 
 
 def test_legacy_budget_setting_seeds_new_strategy_budget(tmp_path) -> None:
@@ -200,7 +200,7 @@ def test_option_quote_parser_preserves_greeks_and_sizes() -> None:
     assert quote.bid_size == Decimal("100")
 
 
-def test_snapshot_health_reports_freshness_depth_and_ask_range() -> None:
+def test_snapshot_health_reports_aggregate_counts_without_quote_values() -> None:
     fresh_symbol = "SPY261028C00680000"
     stale_symbol = "SPY261028C00681000"
     snapshots = {
@@ -213,8 +213,9 @@ def test_snapshot_health_reports_freshness_depth_and_ask_range() -> None:
     )
 
     assert "snapshots=2 parsed=2 fresh=1 two_sided=2" in summary
-    assert "max_reported_delay=3.00m" in summary
-    assert "observed_ask_range=$0.90-$2.50" in summary
+    assert "0.90" not in summary
+    assert "2.50" not in summary
+    assert "3.00m" not in summary
 
 
 def test_contract_parser_accepts_only_standard_100_multiplier() -> None:

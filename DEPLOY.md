@@ -159,9 +159,13 @@ archive it after confirming the sandbox has no positions or open orders.
   their entire premium. The dedicated [Options Trading API docs](https://developer.webull.com/apis/docs/trade-api/options)
   list MARKET orders, though Webull's general FAQ conflicts; verify sandbox
   acceptance before relying on MARKET execution.
-- Entry logs record observed ask, per-contract premium, and estimated total.
-  `spy_option_quote_health` summarizes parsed/fresh quotes, two-sided depth,
-  reported delay, and observed ask range; stale prices are not executable.
+- Entry logs retain order/selection details and buying power, not source quote
+  prices. `spy_option_quote_health` stores aggregate parsed/fresh and
+  two-sided-depth counts only. Actual order-fill prices and realized P&L remain
+  in the trade ledger for position management and review. Startup scrubs old
+  source-quote fields from the two JSON state files; it does not purge prior
+  `bot.log` or systemd journal history. Handle historical log retention
+  according to the applicable data agreement.
 - To reduce throttling, signal confirmation refreshes every 120 seconds and
   full-chain scans are spaced at least 300 seconds apart. HTTP 429 responses
   back off for 300 seconds without restarting the service.
