@@ -146,25 +146,25 @@ archive it after confirming the sandbox has no positions or open orders.
 
 ## Safety notes
 
+- Default strategy is `spy_0dte_options`; use `strategy_mode="equity"` only to
   explicitly run the legacy equity strategy. Do not start options mode until
-  the sandbox account is reset/flat and has no working orders.
-  during CORE hours, and uses MARKET orders.
-  It scans every listed strike for that day's expiration. There is no premium
-  cap from the historical P&L ledger; quantity uses spendable broker buying
-  power and `spy_option_buying_power_fraction`, with no configured local
-  contract ceiling. Webull's public API documentation does not specify a
-  universal numeric maximum. On a quantity rejection, the bot decrements by
-  one and retries, then persists the first accepted quantity as its future
-  ceiling. The default buying-power fraction is
-  100%, so an order can use all available buying power; options may lose their
-  entire premium. The dedicated [Options Trading API docs](https://developer.webull.com/apis/docs/trade-api/options)
+  the sandbox account is flat and has no working orders.
+- The SPY options strategy monitors from 9:25 AM ET, buys same-day contracts
+  during CORE hours, and submits MARKET orders. It scans every listed strike
+  for that day's expiration. Quantity uses spendable broker buying power and
+  `spy_option_buying_power_fraction`; there is no configured local contract
+  ceiling. On a quantity rejection, the bot decrements by one and retries,
+  then persists the first accepted quantity as its future ceiling. The default
+  fraction is 100%, so it can use all available buying power. Options can lose
+  their entire premium. The dedicated [Options Trading API docs](https://developer.webull.com/apis/docs/trade-api/options)
   list MARKET orders, though Webull's general FAQ conflicts; verify sandbox
   acceptance before relying on MARKET execution.
+- Entry logs record observed ask, per-contract premium, and estimated total.
+  `spy_option_quote_health` summarizes parsed/fresh quotes, two-sided depth,
+  reported delay, and observed ask range; stale prices are not executable.
 - To reduce throttling, signal confirmation refreshes every 120 seconds and
   full-chain scans are spaced at least 300 seconds apart. HTTP 429 responses
   back off for 300 seconds without restarting the service.
-  premium. If no contract qualifies, weak-fallback diagnostics include the
-  observed ask range; stale quotes are observations, not executable prices.
 - The highest-premium qualifying contract is selected from those affordable
   within current buying power. If the preferred side's highest-premium contract
   is unaffordable, a cheaper same-side candidate is evaluated. Strong conviction

@@ -176,6 +176,29 @@ def _quote_fresh(quote: OptionQuote, now: datetime, max_delay_minutes: int) -> b
         return False
 
 
+def summarize_option_snapshot_health(
+    snapshots: dict[str, dict[str, Any]],
+    now: datetime,
+    max_delay_minutes: int,
+) -> str:
+    quotes = [quote for record in snapshots.values() if (quote := parse_option_quote(record)) is not None]
+    fresh = [quote for quote in quotes if _quote_fresh(quote, now, max_delay_minutes)]
+    two_sided = [
+        quote for quote in quotes
+        if quote.bid > 0 and quote.ask >= quote.bid and quote.ask > 0
+        and quote.bid_size > 0 and quote.ask_size > 0
+    ]
+    asks = [quote.ask for quote in quotes if quote.ask > 0]
+    delays = [quote.delay_minutes for quote in quotes if quote.delay_minutes is not None]
+    ask_range = f"${min(asks):.2f}-${max(asks):.2f}" if asks else "none"
+    max_reported_delay = f"{max(delays):.2f}m" if delays else "unreported"
+    return (
+        f"snapshots={len(snapshots)} parsed={len(quotes)} fresh={len(fresh)} "
+        f"two_sided={len(two_sided)} max_reported_delay={max_reported_delay} "
+        f"observed_ask_range={ask_range}"
+    )
+
+
 def decide_option_direction(
     bullish: ConfirmationReport,
     bearish: ConfirmationReport,
@@ -747,6 +770,12 @@ class SPY0DTEOptionsLoop:
             return
         quote_map = self.broker.get_option_snapshots([contract.option_symbol for contract in contracts])
         selection_time = self._now()
+        summary.events.append(LoopEvent(
+            "spy_option_quote_health", SPY_SYMBOL,
+            summarize_option_snapshot_health(
+                quote_map, selection_time, self.config.spy_option_max_quote_delay_minutes,
+            ),
+        ))
         active_config = self._effective_config()
 
         def find_candidate(option_type: str, budget: Decimal | None, target_ask: Decimal | None = None):

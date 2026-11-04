@@ -14,6 +14,7 @@ from god_help_tradebot.spy_options import (
     parse_option_quote,
     select_option_contract,
     select_weak_fallback_contract,
+    summarize_option_snapshot_health,
 )
 
 
@@ -197,6 +198,23 @@ def test_option_quote_parser_preserves_greeks_and_sizes() -> None:
     assert quote.theta == -0.8
     assert quote.vega == 0.03
     assert quote.bid_size == Decimal("100")
+
+
+def test_snapshot_health_reports_freshness_depth_and_ask_range() -> None:
+    fresh_symbol = "SPY261028C00680000"
+    stale_symbol = "SPY261028C00681000"
+    snapshots = {
+        fresh_symbol: _snapshot(fresh_symbol, "0.90", bid="0.85", delay="0"),
+        stale_symbol: _snapshot(stale_symbol, "2.50", bid="2.45", delay="3"),
+    }
+
+    summary = summarize_option_snapshot_health(
+        snapshots, datetime(2026, 10, 28, 11, 0, tzinfo=EASTERN), 1,
+    )
+
+    assert "snapshots=2 parsed=2 fresh=1 two_sided=2" in summary
+    assert "max_reported_delay=3.00m" in summary
+    assert "observed_ask_range=$0.90-$2.50" in summary
 
 
 def test_contract_parser_accepts_only_standard_100_multiplier() -> None:
