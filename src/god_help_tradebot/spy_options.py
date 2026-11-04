@@ -746,17 +746,18 @@ class SPY0DTEOptionsLoop:
             summary.events.append(LoopEvent("spy_option_chain_empty", SPY_SYMBOL, "no same-day SPY contracts returned"))
             return
         quote_map = self.broker.get_option_snapshots([contract.option_symbol for contract in contracts])
+        selection_time = self._now()
         active_config = self._effective_config()
 
         def find_candidate(option_type: str, budget: Decimal | None, target_ask: Decimal | None = None):
             candidate = select_option_contract(
-                contracts, quote_map, option_type, active_config, now,
+                contracts, quote_map, option_type, active_config, selection_time,
                 budget_usd=budget, target_ask=target_ask,
             )
             used_fallback = False
             if candidate.contract is None and signal.regime.startswith("weak_"):
                 candidate = select_weak_fallback_contract(
-                    contracts, quote_map, option_type, active_config, now,
+                    contracts, quote_map, option_type, active_config, selection_time,
                     budget_usd=budget, target_ask=target_ask,
                 )
                 used_fallback = candidate.contract is not None
@@ -813,6 +814,7 @@ class SPY0DTEOptionsLoop:
             "entry_filled_quantity": 0, "exit_filled_quantity": 0,
             "entry_average_price": None, "requested_quantity": quantity,
             "buying_power_at_entry_usd": str(buying_power),
+            "selection_timestamp": selection_time.isoformat(),
             "entry_quoted_ask": str(selection.quote.ask),
             "entry_quote_volume": str(selection.quote.volume),
             "entry_delta": selection.quote.delta,

@@ -128,6 +128,21 @@ def test_entry_logs_premium_and_sizes_above_old_reporting_baseline(tmp_path):
     assert "estimated_total=$10,000.00" in entry.detail
 
 
+def test_snapshot_time_after_cycle_start_is_checked_against_post_fetch_clock(tmp_path):
+    cycle_started = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    snapshots_returned = cycle_started + timedelta(seconds=20)
+    broker = _Broker(_option_quote(quote_time="2026-10-28T14:00:20Z"))
+    loop = SPY0DTEOptionsLoop(
+        broker, BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: snapshots_returned,
+    )
+    signal = OptionSignal("CALL", "strong_bullish", "test", .82, .30, 4, "up")
+
+    loop._open_position(signal, cycle_started, LoopSummary())
+
+    assert broker.orders
+
+
 def test_entry_quantity_has_no_fixed_local_ceiling(tmp_path):
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
     broker = _Broker(_option_quote(ask_size="100000"))
@@ -299,11 +314,13 @@ def test_http_429_uses_long_backoff_without_triggering_restart_threshold(tmp_pat
         raise RuntimeError("HTTP Status: 429, Code: TOO_MANY_REQUESTS")
 
     loop._run_cycle = raise_rate_limit
-    summary = loop.run_once()
+    summary = LoopSummary()
+    for _ in range(loop.max_consecutive_errors + 1):
+        loop.run_once(summary)
 
     assert loop._consecutive_errors == 0
     assert loop.error_backoff_seconds == 300
-    assert summary.events[0].kind == "rate_limit_backoff"
+    assert sum(event.kind == "rate_limit_backoff" for event in summary.events) == loop.max_consecutive_errors + 1
 
 
 def test_definitive_market_order_rejection_clears_pending_state(tmp_path, monkeypatch):
