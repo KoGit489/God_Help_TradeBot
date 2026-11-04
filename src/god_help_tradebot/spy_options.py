@@ -378,6 +378,11 @@ def _is_quantity_rejection(exc: Exception) -> bool:
     ))
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc).upper()
+    return "429" in text or "TOO_MANY_REQUESTS" in text or "RATE LIMIT" in text
+
+
 def _is_definitive_order_rejection(exc: Exception) -> bool:
     text = str(exc).upper()
     return any(value in text for value in (
@@ -411,6 +416,10 @@ class SPY0DTEOptionsLoop:
         self._now = now_provider or (lambda: datetime.now(EASTERN))
         self._consecutive_errors = 0
         self._market_news = None
+        self._signal_cache: OptionSignal | None = None
+        self._signal_cache_updated_at: datetime | None = None
+        self._last_logged_signal_key: tuple[Any, ...] | None = None
+        self._last_signal_log_at: datetime | None = None
         self._state = self._load_state()
         self._performance = self._load_performance()
         self._effective_config()
@@ -600,10 +609,21 @@ class SPY0DTEOptionsLoop:
         try:
             self._run_cycle(summary)
             self._consecutive_errors = 0
+            self.error_backoff_seconds = 30.0
         except Exception as exc:
             summary.polls += 1
-            self._consecutive_errors += 1
-            summary.events.append(LoopEvent("error", SPY_SYMBOL, f"{type(exc).__name__}: {exc} (x{self._consecutive_errors})"))
+            if _is_rate_limit_error(exc):
+                self._consecutive_errors = 0
+                self.error_backoff_seconds = float(self.config.spy_option_rate_limit_backoff_seconds)
+                summary.events.append(LoopEvent(
+                    "rate_limit_backoff", SPY_SYMBOL,
+                    f"{type(exc).__name__}: {exc}; backing off {self.error_backoff_seconds:.0f}s without restarting",
+                ))
+            else:
+                self._consecutive_errors += 1
+                summary.events.append(LoopEvent(
+                    "error", SPY_SYMBOL, f"{type(exc).__name__}: {exc} (x{self._consecutive_errors})",
+                ))
         return summary
 
     def _run_cycle(self, summary: LoopSummary) -> None:
@@ -637,16 +657,44 @@ class SPY0DTEOptionsLoop:
         if now < start or now >= session.exit_time:
             return
         signal = self._evaluate_signal()
-        summary.events.append(LoopEvent(
-            "spy_signal", SPY_SYMBOL,
-            f"{signal.regime}: {signal.reason}; bull={signal.bullish_score:.3f} bear={signal.bearish_score:.3f} "
-            f"signals={signal.signals_present} trend={signal.trend}",
-        ))
+        signal_key = (signal.regime, signal.option_type)
+        should_log_signal = (
+            signal_key != self._last_logged_signal_key
+            or self._last_signal_log_at is None
+            or (now - self._last_signal_log_at).total_seconds() >= self.config.spy_option_signal_refresh_seconds
+        )
+        if should_log_signal:
+            summary.events.append(LoopEvent(
+                "spy_signal", SPY_SYMBOL,
+                f"{signal.regime}: {signal.reason}; bull={signal.bullish_score:.3f} bear={signal.bearish_score:.3f} "
+                f"signals={signal.signals_present} trend={signal.trend}",
+            ))
+            self._last_logged_signal_key = signal_key
+            self._last_signal_log_at = now
         if not self.allow_entries or signal.option_type is None or now < session.market_open or self._state.get("entry_attempted"):
             return
+        next_scan_value = self._state.get("next_option_scan_at")
+        if next_scan_value:
+            try:
+                next_scan = datetime.fromisoformat(next_scan_value)
+            except (TypeError, ValueError):
+                next_scan = now
+            if next_scan.tzinfo is None:
+                next_scan = next_scan.replace(tzinfo=now.tzinfo)
+            if now < next_scan:
+                return
+        self._state["next_option_scan_at"] = (
+            now + timedelta(seconds=self.config.spy_option_chain_scan_interval_seconds)
+        ).isoformat()
+        self._save_state()
         self._open_position(signal, now, summary)
 
     def _evaluate_signal(self) -> OptionSignal:
+        now = self._now()
+        if self._signal_cache is not None and self._signal_cache_updated_at is not None:
+            age = (now - self._signal_cache_updated_at).total_seconds()
+            if 0 <= age < self.config.spy_option_signal_refresh_seconds:
+                return self._signal_cache
         active_config = self._effective_config()
         if self._market_news is None:
             try:
@@ -655,7 +703,10 @@ class SPY0DTEOptionsLoop:
                 self._market_news = None
         bull = confirm_candidate(self.broker, SPY_SYMBOL, min_score=active_config.spy_option_weak_floor, market_news=self._market_news)
         bear = confirm_candidate_bearish(self.broker, SPY_SYMBOL, min_score=active_config.spy_option_weak_floor, market_news=self._market_news)
-        return decide_option_direction(bull, bear, active_config, trend=trend_direction(self.broker, SPY_SYMBOL))
+        signal = decide_option_direction(bull, bear, active_config, trend=trend_direction(self.broker, SPY_SYMBOL))
+        self._signal_cache = signal
+        self._signal_cache_updated_at = now
+        return signal
 
     def _list_contracts(self, expiry: str) -> list[OptionContract]:
         found: dict[str, OptionContract] = {}

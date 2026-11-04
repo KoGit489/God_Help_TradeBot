@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -187,6 +187,32 @@ def test_contract_scan_requests_all_same_day_strikes(tmp_path):
     assert requested_ranges == [(None, None)]
 
 
+def test_full_chain_scan_is_cooled_down_after_a_rejection(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    broker = _Broker(_option_quote(ask_size="0"))
+    scans = []
+    original = broker.get_option_contracts
+
+    def count_scan(*args, **kwargs):
+        scans.append(1)
+        return original(*args, **kwargs)
+
+    broker.get_option_contracts = count_scan
+    loop = SPY0DTEOptionsLoop(
+        broker, BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+    )
+    loop._evaluate_signal = lambda: OptionSignal(
+        "CALL", "strong_bullish", "test", .82, .30, 4, "up",
+    )
+
+    loop.run_once()
+    loop.run_once()
+
+    assert len(scans) == 1
+    assert loop._state["next_option_scan_at"] == (now + timedelta(seconds=300)).isoformat()
+
+
 def test_entry_sizing_ignores_starting_equity_and_override_ledger_values(tmp_path):
     now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
     state_file = tmp_path / "spy_options_state.json"
@@ -260,6 +286,24 @@ def test_one_contract_quantity_rejection_clears_pending_state(tmp_path, monkeypa
     assert loop._state["status"] == "NO_FILL"
     assert "pending_order_id" not in loop._state
     assert any(event.kind == "spy_option_sizing_blocked" for event in summary.events)
+
+
+def test_http_429_uses_long_backoff_without_triggering_restart_threshold(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    loop = SPY0DTEOptionsLoop(
+        _Broker(_option_quote()), BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+    )
+
+    def raise_rate_limit(summary):
+        raise RuntimeError("HTTP Status: 429, Code: TOO_MANY_REQUESTS")
+
+    loop._run_cycle = raise_rate_limit
+    summary = loop.run_once()
+
+    assert loop._consecutive_errors == 0
+    assert loop.error_backoff_seconds == 300
+    assert summary.events[0].kind == "rate_limit_backoff"
 
 
 def test_definitive_market_order_rejection_clears_pending_state(tmp_path, monkeypatch):
@@ -383,6 +427,55 @@ def test_strong_signal_does_not_use_weak_contract_fallback(tmp_path):
 
     assert broker.orders == []
     assert not any(event.kind == "spy_option_weak_fallback" for event in summary.events)
+
+
+def test_signal_analysis_is_cached_between_fast_polls(tmp_path, monkeypatch):
+    import god_help_tradebot.spy_options as strategy
+
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    counts = {"bull": 0, "bear": 0, "trend": 0}
+
+    def report(score, key):
+        counts[key] += 1
+        return SimpleNamespace(
+            score=score, signals_present=4, market_article_count=0, market_score=None,
+        )
+
+    monkeypatch.setattr(strategy, "confirm_candidate", lambda *a, **k: report(.82, "bull"))
+    monkeypatch.setattr(strategy, "confirm_candidate_bearish", lambda *a, **k: report(.30, "bear"))
+
+    def trend(*args, **kwargs):
+        counts["trend"] += 1
+        return "up"
+
+    monkeypatch.setattr(strategy, "trend_direction", trend)
+    loop = SPY0DTEOptionsLoop(
+        _Broker(_option_quote()), BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+    )
+    loop._market_news = object()
+
+    first = loop._evaluate_signal()
+    second = loop._evaluate_signal()
+
+    assert first == second
+    assert counts == {"bull": 1, "bear": 1, "trend": 1}
+
+
+def test_identical_signal_event_is_not_logged_on_every_poll(tmp_path):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=EASTERN)
+    loop = SPY0DTEOptionsLoop(
+        _Broker(_option_quote()), BotConfig(strategy_mode="spy_0dte_options"),
+        state_file=tmp_path / "spy_options_state.json", now_provider=lambda: now,
+        allow_entries=False,
+    )
+    loop._evaluate_signal = lambda: OptionSignal(None, "neutral", "no bias", .51, .49, 2, "up")
+
+    first = loop.run_once()
+    second = loop.run_once()
+
+    assert sum(event.kind == "spy_signal" for event in first.events) == 1
+    assert not any(event.kind == "spy_signal" for event in second.events)
 
 
 @pytest.mark.parametrize("bid, reason", [("1.17", "TAKE_PROFIT"), ("0.81", "STOP_LOSS")])

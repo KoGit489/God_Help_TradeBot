@@ -62,6 +62,9 @@ _TUNABLES = {
     "spy_option_strong_direction_gap": float,
     "spy_option_min_signal_count": int,
     "spy_option_max_quote_delay_minutes": int,
+    "spy_option_signal_refresh_seconds": int,
+    "spy_option_chain_scan_interval_seconds": int,
+    "spy_option_rate_limit_backoff_seconds": int,
     "spy_option_scan_minutes_before_open": int,
 }
 

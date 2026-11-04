@@ -79,6 +79,9 @@ class BotConfig:
     spy_option_strong_direction_gap: float = 0.15
     spy_option_min_signal_count: int = 2
     spy_option_max_quote_delay_minutes: int = 1
+    spy_option_signal_refresh_seconds: int = 120
+    spy_option_chain_scan_interval_seconds: int = 300
+    spy_option_rate_limit_backoff_seconds: int = 300
     spy_option_scan_minutes_before_open: int = 5
 
     def __post_init__(self) -> None:
@@ -148,5 +151,11 @@ class BotConfig:
             raise ValueError("spy_option_min_signal_count must be positive")
         if self.spy_option_max_quote_delay_minutes < 0:
             raise ValueError("spy_option_max_quote_delay_minutes cannot be negative")
+        if self.spy_option_signal_refresh_seconds < 1:
+            raise ValueError("spy_option_signal_refresh_seconds must be positive")
+        if self.spy_option_chain_scan_interval_seconds < 1:
+            raise ValueError("spy_option_chain_scan_interval_seconds must be positive")
+        if self.spy_option_rate_limit_backoff_seconds < 1:
+            raise ValueError("spy_option_rate_limit_backoff_seconds must be positive")
         if self.spy_option_scan_minutes_before_open < 0:
             raise ValueError("spy_option_scan_minutes_before_open cannot be negative")

@@ -146,10 +146,8 @@ archive it after confirming the sandbox has no positions or open orders.
 
 ## Safety notes
 
-- Default strategy is `spy_0dte_options`; use `strategy_mode="equity"` only to
   explicitly run the legacy equity strategy. Do not start options mode until
   the sandbox account is reset/flat and has no working orders.
-- The SPY paper strategy monitors from 9:25 AM ET, buys same-day SPY contracts
   during CORE hours, and uses MARKET orders.
   It scans every listed strike for that day's expiration. There is no premium
   cap from the historical P&L ledger; quantity uses spendable broker buying
@@ -162,7 +160,9 @@ archive it after confirming the sandbox has no positions or open orders.
   entire premium. The dedicated [Options Trading API docs](https://developer.webull.com/apis/docs/trade-api/options)
   list MARKET orders, though Webull's general FAQ conflicts; verify sandbox
   acceptance before relying on MARKET execution.
-- Entry logs record the observed ask per share, premium per contract, and estimated total
+- To reduce throttling, signal confirmation refreshes every 120 seconds and
+  full-chain scans are spaced at least 300 seconds apart. HTTP 429 responses
+  back off for 300 seconds without restarting the service.
   premium. If no contract qualifies, weak-fallback diagnostics include the
   observed ask range; stale quotes are observations, not executable prices.
 - The highest-premium qualifying contract is selected from those affordable
