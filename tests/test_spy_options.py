@@ -225,3 +225,11 @@ def test_contract_parser_accepts_only_standard_100_multiplier() -> None:
     }
     assert parse_contract(standard) == _contract("SPY261028C00680000", "CALL")
     assert parse_contract(standard | {"multiplier": "10"}) is None
+
+
+def test_real_time_quote_cadence_keeps_rate_limit_backoff() -> None:
+    config = BotConfig()
+
+    assert config.spy_option_signal_refresh_seconds == 60
+    assert config.spy_option_chain_scan_interval_seconds == 60
+    assert config.spy_option_rate_limit_backoff_seconds == 300

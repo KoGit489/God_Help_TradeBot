@@ -231,7 +231,9 @@ def test_full_chain_scan_is_cooled_down_after_a_rejection(tmp_path):
     loop.run_once()
 
     assert len(scans) == 1
-    assert loop._state["next_option_scan_at"] == (now + timedelta(seconds=300)).isoformat()
+    assert loop._state["next_option_scan_at"] == (
+        now + timedelta(seconds=loop.config.spy_option_chain_scan_interval_seconds)
+    ).isoformat()
 
 
 def test_entry_sizing_ignores_starting_equity_and_override_ledger_values(tmp_path):
