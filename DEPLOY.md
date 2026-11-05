@@ -123,7 +123,7 @@ config.update({
   "strategy_mode": "spy_0dte_options",
   "spy_option_buying_power_fraction": 1.0,
   "spy_option_signal_refresh_seconds": 60,
-  "spy_option_chain_scan_interval_seconds": 60,
+  "spy_option_chain_scan_interval_seconds": 30,
   "spy_option_rate_limit_backoff_seconds": 300,
 })
 temp = path.with_suffix(".json.tmp")
@@ -170,8 +170,9 @@ archive it after confirming the sandbox has no positions or open orders.
   `bot.log` or systemd journal history. Handle historical log retention
   according to the applicable data agreement.
 - With real-time OPRA entitlement, signal confirmation refreshes every 60
-  seconds and full-chain scans are spaced at least 60 seconds apart. HTTP 429
-  responses still back off for 300 seconds without restarting the service.
+  seconds and the full-chain snapshot scan runs once per 30-second poll cycle.
+  HTTP 429 responses still back off for 300 seconds without restarting the
+  service.
 - The highest-premium qualifying contract is selected from those affordable
   within current buying power. If the preferred side's highest-premium contract
   is unaffordable, a cheaper same-side candidate is evaluated. Strong conviction

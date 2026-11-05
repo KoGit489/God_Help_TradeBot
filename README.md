@@ -8,7 +8,7 @@ Sandbox-only Webull API bot. The default Prototype strategy is **SPY 0DTE long o
 - Uses SPY 5-minute chart patterns/trend, ticker and broad-market news, flow/analyst signals when available, and option Greeks for contract validation.
 - Strong directional consensus buys with the signal (bullish = call, bearish = put). Moderate directional consensus is inverted per the configured rule. Weak directional signals get a second-stage contract search if strict selection finds nothing.
 - Searches the full listed same-day SPY chain across all strikes and filters by spendable buying power before ranking. If the highest-premium preferred-side contract is unaffordable, it selects the best affordable contract on that side. High conviction keeps that direction; weak conviction flips to the opposite option type with the closest eligible premium. Neutral/insufficient signals still abstain.
-- With real-time OPRA entitlement, conviction analysis refreshes every 60 seconds and full-chain scans are at least 60 seconds apart. HTTP 429 responses still trigger a 300-second backoff without restarting the service.
+- With real-time OPRA entitlement, conviction analysis refreshes every 60 seconds and the full-chain snapshot scan runs once per 30-second poll cycle. HTTP 429 responses still trigger a 300-second backoff without restarting the service.
 - Sizes the maximum order from spendable broker buying power and `spy_option_buying_power_fraction`. Positive displayed ask depth is required for qualification but does not reduce requested quantity. There is no configured local contract ceiling: on a recognized broker quantity rejection, it decrements by one and retries; after acceptance, that quantity is saved as the ceiling for future trades. Webull publishes no universal numeric maximum. The default fraction is 100%, so an order can commit all available buying power.
 - The persisted ledger tracks realized P&L and five-trade reviews for reporting/adaptation only; it does not cap contract premium or order size. Entry logs retain order/selection details and buying power, not source quote prices. Quote-health events retain aggregate counts only. Actual fill prices and realized P&L remain recorded for trade management and strategy review.
 - Each full-chain poll logs one `spy_option_quote_health` summary with aggregate parsed/fresh quote and two-sided-depth counts only; it omits prices, Greeks, sizes, and quote delays.
@@ -44,7 +44,7 @@ Useful SPY controls in `bot_config.json`:
   "spy_option_max_spread_percent": 20.0,
   "spy_option_weak_max_spread_percent": 45.0,
   "spy_option_signal_refresh_seconds": 60,
-  "spy_option_chain_scan_interval_seconds": 60,
+  "spy_option_chain_scan_interval_seconds": 30,
   "spy_option_rate_limit_backoff_seconds": 300,
   "spy_option_strong_score": 0.70,
   "spy_option_weak_floor": 0.55

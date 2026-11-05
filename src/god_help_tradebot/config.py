@@ -80,7 +80,7 @@ class BotConfig:
     spy_option_min_signal_count: int = 2
     spy_option_max_quote_delay_minutes: int = 1
     spy_option_signal_refresh_seconds: int = 60
-    spy_option_chain_scan_interval_seconds: int = 60
+    spy_option_chain_scan_interval_seconds: int = 30
     spy_option_rate_limit_backoff_seconds: int = 300
     spy_option_scan_minutes_before_open: int = 5
 
