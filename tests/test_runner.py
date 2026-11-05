@@ -78,6 +78,37 @@ def test_default_runner_dispatches_to_spy_options_loop(monkeypatch, tmp_path) ->
     )]
 
 
+def test_runner_waits_for_rate_limit_backoff_without_fatal_errors(monkeypatch, tmp_path) -> None:
+    sleeps = []
+
+    class _RateLimitedLoop:
+        max_consecutive_errors = 5
+        error_backoff_seconds = 300
+
+        def __init__(self, *args, **kwargs):
+            self._consecutive_errors = 0
+            self._rate_limit_backoff_active = False
+            self.recovery_order_ids = frozenset()
+
+        def run_once(self, summary):
+            if summary.polls == 0:
+                self._rate_limit_backoff_active = True
+            else:
+                self._rate_limit_backoff_active = False
+            summary.polls += 1
+            return summary
+
+    monkeypatch.setattr(runner.WebullSandboxBroker, "from_env", lambda: _Broker())
+    monkeypatch.setattr(spy_options, "SPY0DTEOptionsLoop", _RateLimitedLoop)
+    monkeypatch.setattr(runner, "_setup_logging", lambda path: logging.getLogger("test-rate-limit-runner"))
+    monkeypatch.setattr(runner.signal, "signal", lambda signum, handler: None)
+    monkeypatch.setattr(runner.time, "sleep", sleeps.append)
+
+    runner.run_bot(config=BotConfig(), max_polls=2)
+
+    assert sleeps == [300]
+
+
 @pytest.mark.parametrize("payload, allowed", [([], True), ([{"symbol": "RMSG"}], False), ({}, False), (None, False)])
 def test_remote_orders_block_unsafe_startup(payload, allowed) -> None:
     response = SimpleNamespace(status_code=200, json=lambda: payload)

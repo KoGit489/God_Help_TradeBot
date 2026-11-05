@@ -427,6 +427,7 @@ class SPY0DTEOptionsLoop:
         self.performance_path = Path(performance_file) if performance_file else self.state_path.with_name("spy_options_performance.json")
         self._now = now_provider or (lambda: datetime.now(EASTERN))
         self._consecutive_errors = 0
+        self._rate_limit_backoff_active = False
         self._market_news = None
         self._signal_cache: OptionSignal | None = None
         self._signal_cache_updated_at: datetime | None = None
@@ -635,11 +636,13 @@ class SPY0DTEOptionsLoop:
         try:
             self._run_cycle(summary)
             self._consecutive_errors = 0
+            self._rate_limit_backoff_active = False
             self.error_backoff_seconds = 30.0
         except Exception as exc:
             summary.polls += 1
             if _is_rate_limit_error(exc):
                 self._consecutive_errors = 0
+                self._rate_limit_backoff_active = True
                 self.error_backoff_seconds = float(self.config.spy_option_rate_limit_backoff_seconds)
                 summary.events.append(LoopEvent(
                     "rate_limit_backoff", SPY_SYMBOL,

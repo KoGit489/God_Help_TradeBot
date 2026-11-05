@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
@@ -130,9 +131,8 @@ def run_bot(
                 break
             if config.strategy_mode == "equity":
                 _maybe_run_study(logger, config, data_dir, study_state_file, config_file)
-            import time
-
-            time.sleep(loop.error_backoff_seconds if loop._consecutive_errors else poll_seconds)
+            use_backoff = loop._consecutive_errors or getattr(loop, "_rate_limit_backoff_active", False)
+            time.sleep(loop.error_backoff_seconds if use_backoff else poll_seconds)
     finally:
         for sig, handler in previous_handlers.items():
             try:
