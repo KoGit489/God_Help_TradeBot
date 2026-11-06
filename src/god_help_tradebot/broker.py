@@ -236,12 +236,19 @@ class WebullSandboxBroker:
         response = self.session.trade_client.account_v2.get_account_list()
         accounts = _payload_records(response)
         configured = self.session.account_id
-        chosen = next(
-            (a for a in accounts if configured and str(a.get("account_id")) == str(configured)),
-            None,
-        )
-        if chosen is None and accounts:
+        if configured:
+            chosen = next(
+                (a for a in accounts if str(a.get("account_id")) == str(configured)),
+                None,
+            )
+            if chosen is None:
+                raise RuntimeError("Configured Webull sandbox account ID is not available for these API credentials")
+        elif len(accounts) == 1:
             chosen = accounts[0]
+        elif len(accounts) > 1:
+            raise RuntimeError("Multiple Webull sandbox accounts found; set WEBULL_ACCOUNT_ID to select the intended account")
+        else:
+            chosen = None
         account_id = str(chosen.get("account_id")) if chosen else ""
         if not account_id:
             raise RuntimeError("No sandbox accounts are available for this API key")

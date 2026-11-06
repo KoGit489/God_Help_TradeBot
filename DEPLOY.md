@@ -6,7 +6,9 @@ Runs the bot 24/7 without your home PC. Sandbox-only; live trading stays off.
 
 - A small VPS (Ubuntu 22.04+). ~$4–6/month from DigitalOcean, Linode/Akamai,
   Vultr, Hetzner, or a free/cheap tier elsewhere. 1 GB RAM is plenty.
-- Your Webull sandbox App Key / App Secret and the Individual Cash account ID.
+- Your Webull sandbox App Key / App Secret and the intended account ID returned
+  by the sandbox OpenAPI account list. Do not assume the Webull app's paper
+  trading account ID is the same API account ID.
 - Your Alpha Vantage API key (optional but recommended for news).
 
 ## 1. Create the server
@@ -41,6 +43,10 @@ export WEBULL_API_SECRET="your_sandbox_app_secret"
 export WEBULL_ACCOUNT_ID="your_individual_cash_account_id"
 export ALPHAVANTAGE_API_KEY="your_alpha_vantage_key"   # optional
 ```
+
+`WEBULL_ACCOUNT_ID` must match an account returned by these API credentials.
+If the credentials expose multiple accounts, the bot requires this setting and
+will not silently choose the first account.
 
 To make them survive reboots, add the same lines to `~/.bashrc` (or use a
 systemd `Environment=` file — see below).

@@ -31,6 +31,51 @@ def _broker(live_mode=False):
     return broker
 
 
+def _account_broker(configured_id, accounts):
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    response = SimpleNamespace(status_code=200, json=lambda: accounts)
+    broker.session = SimpleNamespace(
+        account_id=configured_id,
+        trade_client=SimpleNamespace(account_v2=SimpleNamespace(
+            get_account_list=lambda: response
+        )),
+    )
+    broker._resolved_account_id = None
+    return broker
+
+
+def test_account_resolution_uses_configured_account_not_first_account():
+    broker = _account_broker("options-account", [
+        {"account_id": "other-account"},
+        {"account_id": "options-account"},
+    ])
+
+    assert broker._resolve_account_id() == "options-account"
+
+
+def test_account_resolution_rejects_configured_account_not_in_api_list():
+    broker = _account_broker("missing-account", [{"account_id": "other-account"}])
+
+    with pytest.raises(RuntimeError, match="Configured Webull sandbox account ID"):
+        broker._resolve_account_id()
+
+
+def test_account_resolution_rejects_ambiguous_accounts_without_configured_id():
+    broker = _account_broker(None, [
+        {"account_id": "first-account"},
+        {"account_id": "second-account"},
+    ])
+
+    with pytest.raises(RuntimeError, match="Multiple Webull sandbox accounts"):
+        broker._resolve_account_id()
+
+
+def test_account_resolution_uses_only_available_account_when_unconfigured():
+    broker = _account_broker(None, [{"account_id": "only-account"}])
+
+    assert broker._resolve_account_id() == "only-account"
+
+
 def test_spy_option_market_order_uses_single_leg_buy_to_open_payload():
     broker = _broker()
     order = broker.submit_option_market_order(
@@ -86,11 +131,20 @@ def test_remote_open_order_interlock_allows_only_persisted_recovery_order():
 def test_buying_power_does_not_fall_back_to_net_liquidation_value():
     broker = _broker()
     payload = {"account_currency_assets": [{"buying_power": "0", "cash_balance": "50", "net_liquidation_value": "500"}]}
+    account_ids = []
+
+    def get_account_balance(account_id):
+        account_ids.append(account_id)
+        return SimpleNamespace(json=lambda: payload)
+
     broker.session.trade_client.account_v2 = SimpleNamespace(
-        get_account_balance=lambda account_id: SimpleNamespace(json=lambda: payload)
+        get_account_balance=get_account_balance
     )
 
     assert broker.get_buying_power() == Decimal("0")
+    payload["account_currency_assets"][0]["buying_power"] = "25"
+    assert broker.get_buying_power() == Decimal("25")
+    assert account_ids == ["paper-account", "paper-account"]
 
     payload["account_currency_assets"][0].pop("buying_power")
     payload["account_currency_assets"][0].pop("cash_balance")
