@@ -123,7 +123,7 @@ class MonitorLoop:
         self._pending_entry: str | None = None
         # Outstanding entry awaiting a terminal status; canceled at cutoff.
         self._pending_limit: dict[str, Any] | None = None
-        # Live quote captured by the pre-entry spread and liquidity check.
+        # Live quote captured by the pre-entry quote and spread checks.
         self._entry_quote: Quote | None = None
         # Order bookkeeping for outcome logging: entry/exit orders we submitted,
         # fills already logged, and entry fill prices for P&L math.
@@ -1165,15 +1165,9 @@ class MonitorLoop:
                 or quote.bid <= 0
                 or quote.ask < quote.bid
                 or quote.last <= 0
-                or quote.bid_volume is None
-                or quote.ask_volume is None
-                or not quote.bid_volume.is_finite()
-                or not quote.ask_volume.is_finite()
-                or quote.bid_volume <= 0
-                or quote.ask_volume <= 0
             ):
                 summary.events.append(
-                    LoopEvent("liquidity_rejected", symbol, "Webull quote lacks positive two-sided depth; no entry submitted")
+                    LoopEvent("quote_rejected", symbol, "Webull quote is missing or has invalid bid/ask prices; no entry submitted")
                 )
                 return False
         if quote is None or quote.last <= 0:

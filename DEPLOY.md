@@ -89,14 +89,13 @@ journalctl -u tradebot -f     # watch logs live
 
 ## Safety notes
 
-- Sandbox orders need executable streaming NBBO liquidity. A reference bid/ask
-  snapshot is not evidence that the sandbox matching engine can fill an order.
-  Webull entries now fail closed if `bid_volume` or `ask_volume` is absent or
-  nonpositive. Missing snapshot depth may therefore stop all entries until the
-  data feed is configured. Positive snapshot depth still does not guarantee a fill.
+- Penny-stock entries require valid live bid/ask prices and a spread within the
+  configured limit, but no longer require displayed bid/ask sizes. This can
+  increase entry attempts when size fields are absent; it does not guarantee a
+  sandbox fill, and market orders can slip or remain unfilled.
 - `exit_liquidity_wait` means an existing exit is still pending without usable
-  quote depth. The bot does not repeatedly cancel and replace it to manufacture
-  liquidity. `cancel_pending` means replacement is blocked awaiting server
+  quote size. The bot does not repeatedly cancel and replace it without usable
+  size. `cancel_pending` means replacement is blocked awaiting server
   confirmation. Neither event means the position is flat.
 - Entry cutoff (one minute before close) and CORE market close are separate.
   All monitor entries, take-profits, stops, flatten orders, and exit retries
@@ -150,9 +149,9 @@ journalctl -u tradebot -f     # watch logs live
   reduce some fitting risks but do not prevent overfitting. For the initial
   monitored sessions, recommend explicitly setting `study_auto_improve` to
   `false`; recording and reports remain available without promoting changes.
-- Local tests do not establish that the server receives depth fields. Observe
-  `liquidity_rejected`, `exit_liquidity_wait`, and `cancel_pending` logs before
-  judging profitability. Do not remove the price cap to force a fill.
+- Observe `quote_rejected`, `spread_rejected`, `exit_liquidity_wait`, and
+  `cancel_pending` logs when reviewing paper runs. Do not treat entries submitted
+  without displayed size as proof of available execution liquidity.
 
 ### Market-only execution and scan capacity
 
