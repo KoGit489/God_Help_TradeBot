@@ -27,6 +27,40 @@ def test_account_price_priority_preserves_share_cap_and_allows_sub_dollar_prices
     assert plan.quantity == 199_999
 
 
+@pytest.mark.parametrize("buying_power", [None, Decimal("0"), Decimal("-1"), Decimal("NaN")])
+def test_entry_scan_is_blocked_without_spendable_buying_power(monkeypatch, buying_power):
+    from god_help_tradebot import MonitorLoop, PaperBroker
+    from god_help_tradebot.monitor import LoopSummary
+
+    broker = PaperBroker(1_000)
+    broker.get_buying_power = lambda: buying_power
+    loop = MonitorLoop(broker, BotConfig(account_price_priority=True))
+    monkeypatch.setattr(loop, "_market_open", lambda: True)
+    monkeypatch.setattr(loop, "_in_entry_cooldown", lambda: False)
+    monkeypatch.setattr(loop, "_gather_snapshots", lambda: pytest.fail("must not scan without buying power"))
+    summary = LoopSummary()
+    loop._maybe_enter(summary)
+    assert summary.events[-1].kind == "sizing_blocked"
+
+
+def test_buying_power_is_refreshed_before_each_candidate_scan(monkeypatch):
+    from god_help_tradebot import MonitorLoop, PaperBroker
+    from god_help_tradebot.monitor import LoopSummary
+
+    broker = PaperBroker(1_000)
+    funds = iter([Decimal("1000000"), Decimal("500")])
+    broker.get_buying_power = lambda: next(funds)
+    loop = MonitorLoop(broker, BotConfig(account_price_priority=True))
+    monkeypatch.setattr(loop, "_market_open", lambda: True)
+    monkeypatch.setattr(loop, "_in_entry_cooldown", lambda: False)
+    monkeypatch.setattr(loop, "_gather_snapshots", lambda: [])
+    summary = LoopSummary()
+    loop._maybe_enter(summary)
+    loop._maybe_enter(summary)
+    assert "$1,000,000.00" in summary.events[0].detail
+    assert "$500.00" in summary.events[1].detail
+
+
 def test_pct_mode_deploys_fraction_of_account() -> None:
     config = BotConfig(position_pct_of_account=1.0)
     plan = build_trade_plan(2.0, 1.8, config, account_value=100_000)

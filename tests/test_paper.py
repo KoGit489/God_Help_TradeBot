@@ -7,6 +7,30 @@ from god_help_tradebot.broker import BrokerAdapter, OrderPreview, WebullSandboxB
 from god_help_tradebot.settings import load_webull_config
 
 
+def test_buying_power_refreshes_without_using_account_equity():
+    from types import SimpleNamespace
+
+    payload = {"buying_power": 0, "cash_balance": "100", "net_liquidation_value": "1000000"}
+    requested = []
+
+    def balance(account_id):
+        requested.append(account_id)
+        return SimpleNamespace(json=lambda: payload)
+
+    adapter = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    adapter._resolve_account_id = lambda: "margin-test"
+    adapter.session = SimpleNamespace(trade_client=SimpleNamespace(
+        account_v2=SimpleNamespace(get_account_balance=balance)
+    ))
+    assert adapter.get_buying_power() == Decimal("0")
+    payload["buying_power"] = "500"
+    assert adapter.get_buying_power() == Decimal("500")
+    payload.pop("buying_power")
+    payload.pop("cash_balance")
+    assert adapter.get_buying_power() is None
+    assert requested == ["margin-test"] * 3
+
+
 def quote(bid: float, ask: float, last: float) -> Quote:
     return Quote("TEST", Decimal(str(bid)), Decimal(str(ask)), Decimal(str(last)))
 

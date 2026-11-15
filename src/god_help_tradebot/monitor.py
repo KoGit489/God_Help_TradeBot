@@ -521,6 +521,12 @@ class MonitorLoop:
     def _maybe_enter(self, summary: LoopSummary) -> None:
         if not self._market_open() or self._in_entry_cooldown():
             return
+        if self.config.account_price_priority:
+            buying_power = self._account_value()
+            if buying_power is None or not Decimal(str(buying_power)).is_finite() or buying_power <= 0:
+                summary.events.append(LoopEvent("sizing_blocked", "account", "current buying power unavailable or zero; no candidate scan"))
+                return
+            summary.events.append(LoopEvent("account_buying_power", "account", f"current sandbox buying power ${buying_power:,.2f}"))
         self._confirm_budget_used = 0  # fresh deep-check budget each cycle
         today = self._now().date()
         if self._entry_blocked_date != today:

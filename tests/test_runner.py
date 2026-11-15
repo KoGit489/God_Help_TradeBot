@@ -59,3 +59,27 @@ def test_remote_orders_block_unsafe_startup(payload, allowed) -> None:
     else:
         with pytest.raises(RuntimeError, match="startup blocked"):
             broker.assert_no_remote_open_orders()
+
+
+@pytest.mark.parametrize("buying_power, expected", [(1_000_000, "$1000000.00"), (None, "unavailable")])
+def test_startup_reports_account_buying_power_before_polling(monkeypatch, tmp_path, caplog, buying_power, expected):
+    broker = _Broker()
+    calls = []
+
+    def balance():
+        calls.append("balance")
+        return buying_power
+
+    broker.get_buying_power = balance
+    monkeypatch.setattr(runner.WebullSandboxBroker, "from_env", lambda: broker)
+    monkeypatch.setattr(runner, "_setup_logging", lambda path: logging.getLogger("test-account-startup"))
+    monkeypatch.setattr(runner.signal, "signal", lambda signum, handler: None)
+    with caplog.at_level(logging.INFO):
+        result = runner.run_bot(
+            config=BotConfig(account_price_priority=True), state_file=tmp_path / "state.json",
+            record_data=False, stop_flag=lambda: True,
+        )
+    assert result.polls == 0
+    assert calls == ["balance"]
+    assert "account_buying_power" in caplog.text
+    assert expected in caplog.text

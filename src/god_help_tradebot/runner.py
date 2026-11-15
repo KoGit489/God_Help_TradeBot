@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import signal
+from decimal import Decimal
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
@@ -91,6 +92,13 @@ def run_bot(
     )
 
     stop_requested = {"flag": False}
+
+    if config.account_price_priority:
+        buying_power = loop._account_value()
+        if buying_power is not None and Decimal(str(buying_power)).is_finite() and buying_power >= 0:
+            logger.info("[account_buying_power] sandbox: startup buying power $%.2f", buying_power)
+        else:
+            logger.warning("[account_buying_power] sandbox: startup buying power unavailable; entry scans blocked until it recovers")
 
     def _handle_signal(signum, frame):  # noqa: ARG001
         stop_requested["flag"] = True

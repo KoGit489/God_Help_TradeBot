@@ -97,10 +97,14 @@ Normal candidates are ranked by descending stock price, then screen score, while
 retaining confirmation, trend, spread, volume, timing, and recovery gates. The
 bounded discovery scanner is not an exhaustive scan of every US stock.
 
-The bot fetches current buying power before selection and again before entry,
+The bot reports buying power at startup as `[account_buying_power]`, refreshes
+it before each new candidate scan and selection, and again before entry. It
 uses 98% of it for sizing, rounds down to whole shares, and retains the 199,999
 share limit. Long sizing uses the latest ask; short sizing uses the latest bid.
 Missing or nonpositive buying power blocks entries, with no fixed-budget fallback.
+Zero buying power is preserved; account equity is never substituted for missing
+buying power. Cash balance is used only when the buying-power field is absent.
+Missing funds block entry scans without disabling existing-position exit management.
 Whole shares, the share cap, market-price changes, and broker margin rules can
 leave funds unused or cause rejection. Margin buying power may include leverage;
 it is not the cash balance or equity. Full-budget sizing is highly concentrated.
