@@ -1,6 +1,30 @@
 from decimal import Decimal
 
+import pytest
+
 from god_help_tradebot import BotConfig, build_trade_plan
+from god_help_tradebot.risk import build_short_plan
+
+
+@pytest.mark.parametrize("build,stop", [(build_trade_plan, 270.0), (build_short_plan, 330.0)])
+def test_account_price_priority_uses_buying_power_above_legacy_price_cap(build, stop):
+    config = BotConfig(account_price_priority=True)
+    plan = build(300.0, stop, config, account_value=100_000)
+    assert plan.quantity == 326
+    assert plan.entry_price * plan.quantity <= Decimal("98000")
+    assert build(300.0, stop, config, account_value=1_000).quantity == 3
+
+
+@pytest.mark.parametrize("buying_power", [None, 0, -1, float("nan"), float("inf")])
+def test_account_price_priority_never_falls_back_to_fixed_caps(buying_power):
+    for build, stop in ((build_trade_plan, 270.0), (build_short_plan, 330.0)):
+        with pytest.raises(ValueError, match="buying power"):
+            build(300.0, stop, BotConfig(account_price_priority=True), account_value=buying_power)
+
+
+def test_account_price_priority_preserves_share_cap_and_allows_sub_dollar_prices():
+    plan = build_trade_plan(0.50, 0.45, BotConfig(account_price_priority=True), account_value=1_000_000)
+    assert plan.quantity == 199_999
 
 
 def test_pct_mode_deploys_fraction_of_account() -> None:

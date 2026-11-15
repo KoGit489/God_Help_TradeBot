@@ -1,5 +1,7 @@
 ﻿from decimal import Decimal
 
+import pytest
+
 from god_help_tradebot import OrderSide, OrderStatus, OrderType, PaperBroker, Quote
 from god_help_tradebot.broker import BrokerAdapter, OrderPreview, WebullSandboxBroker, WebullSdkSession
 from god_help_tradebot.settings import load_webull_config
@@ -247,7 +249,21 @@ def test_webull_positions_map_from_sandbox() -> None:
     assert adapter.get_position("OTHER") is None
 
 
-def test_webull_positions_fall_back_to_first_sandbox_account() -> None:
+@pytest.mark.parametrize("account_type", ["CASH", "UNKNOWN", "MARGIN"])
+def test_webull_shorting_requires_confirmed_margin_account(account_type):
+    session = WebullSdkSession(
+        trade_client=_FakeTradeClient(_FakeAccountV2(accounts=[{"account_id": "margin-test", "account_type": account_type}])),
+        data_client=_FakeDataClient([]), account_id="margin-test",
+    )
+    adapter = WebullSandboxBroker(session=session)
+    if account_type == "MARGIN":
+        adapter.assert_margin_account()
+    else:
+        with pytest.raises(RuntimeError, match="MARGIN"):
+            adapter.assert_margin_account()
+
+
+def test_webull_positions_reject_stale_configured_account() -> None:
     account_v2 = _FakeAccountV2(accounts=[{"account_id": "sandbox-first"}], positions=[])
     session = WebullSdkSession(
         trade_client=_FakeTradeClient(account_v2),
@@ -256,8 +272,9 @@ def test_webull_positions_fall_back_to_first_sandbox_account() -> None:
     )
     adapter = WebullSandboxBroker(session=session)
 
-    assert adapter.get_positions() == {}
-    assert account_v2.requested_account_id == "sandbox-first"
+    with pytest.raises(RuntimeError, match="Configured Webull sandbox account ID"):
+        adapter.get_positions()
+    assert account_v2.requested_account_id is None
 
 
 def test_webull_submit_order_places_sandbox_order_with_correct_payload() -> None:

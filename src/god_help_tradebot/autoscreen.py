@@ -186,7 +186,7 @@ def auto_screen_snapshots(
         snapshot = screener_row_to_snapshot(row)
         if snapshot is None:
             continue
-        if not config.min_symbol_price <= snapshot.price <= config.max_symbol_price:
+        if not config.accepts_price(snapshot.price):
             continue
         # Pre-pop discovery keeps quiet movers; momentum needs the move up;
         # losers need the move down.
@@ -229,7 +229,7 @@ def discover_market_snapshots(
                 seen.setdefault(snapshot.symbol, snapshot)
     eligible = sorted(
         (snapshot for snapshot in seen.values()
-         if config.min_symbol_price <= snapshot.price <= config.max_symbol_price),
+         if config.accepts_price(snapshot.price)),
         key=lambda snapshot: snapshot.symbol,
     )
     if not eligible:

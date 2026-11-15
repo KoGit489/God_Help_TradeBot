@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 from god_help_tradebot import BotConfig, MonitorLoop, PaperBroker
 from god_help_tradebot.broker import WebullSandboxBroker
-from god_help_tradebot.paper import OrderSide
+from god_help_tradebot.paper import OrderSide, Quote
+from decimal import Decimal
 from god_help_tradebot.schedule import EASTERN
 from god_help_tradebot.screen import MarketSnapshot
 
@@ -46,6 +47,61 @@ def _bullish_fallback() -> MarketSnapshot:
 # loser gates (rvol >= 2), survives the relaxed bearish fallback screen.
 def _bearish_fallback() -> MarketSnapshot:
     return _snapshot("BUMR", 4.00, change_percent=-6.0, relative_volume=1.5, day_low=3.90, day_high=4.30)
+
+
+def test_price_priority_selects_highest_affordable_qualified_stock(monkeypatch):
+    from god_help_tradebot.monitor import LoopSummary
+
+    broker = PaperBroker(1_000)
+    broker.get_buying_power = lambda: Decimal("1000")
+    loop = MonitorLoop(broker, BotConfig(account_price_priority=True), now_provider=_open_now)
+    monkeypatch.setattr(loop, "_passes_confirmation", lambda *args, **kwargs: True)
+    snapshots = [
+        _snapshot("LOW", 4, 6, 3, 3.9, 4.3),
+        _snapshot("HIGH", 300, 6, 3, 290, 310),
+        _snapshot("UNAFFORDABLE", 1100, 6, 3, 1090, 1110),
+    ]
+    selected = loop._select_candidate(snapshots, LoopSummary())
+    assert selected[0].candidate.snapshot.symbol == "HIGH"
+    assert selected[1] is False
+    broker.get_buying_power = lambda: None
+    assert loop._select_candidate(snapshots, LoopSummary()) is None
+
+
+def test_price_priority_fallback_uses_highest_price_then_weakest_score(monkeypatch):
+    import god_help_tradebot.monitor as monitor
+    from god_help_tradebot.screen import RankedCandidate
+
+    broker = PaperBroker(1_000)
+    loop = MonitorLoop(broker, BotConfig(account_price_priority=True), now_provider=_open_now)
+    lower = _snapshot("LOW", 4, 6, 1.5, 3.9, 4.3)
+    higher = _snapshot("HIGH", 300, 6, 1.5, 290, 310)
+    weakest = _snapshot("HIGH_WEAK", 300, 6, 1.5, 290, 310)
+    monkeypatch.setattr(monitor, "screen_candidates", lambda *args: [
+        RankedCandidate(lower, 0.01), RankedCandidate(higher, 0.9), RankedCandidate(weakest, 0.2),
+    ])
+    loop.allow_shorts = True
+    monkeypatch.setattr(monitor, "screen_loser_candidates", lambda *args: [])
+    selected = loop._best_odds_fallback([], monitor.LoopSummary())
+    assert selected[0].candidate.snapshot.symbol == "HIGH_WEAK"
+
+
+def test_price_priority_keeps_inverse_fallback_and_refreshes_entry_funds():
+    from god_help_tradebot.monitor import LoopSummary
+
+    for change, expected_side in ((6, OrderSide.SHORT), (-6, OrderSide.BUY)):
+        snapshot = _snapshot("HIGH", 300, change, 1.5, 290, 330)
+        broker = PaperBroker(1_000)
+        funds = iter([Decimal("1000"), Decimal("600")])
+        broker.get_buying_power = lambda: next(funds)
+        broker.last_quotes["HIGH"] = Quote("HIGH", Decimal("299.99"), Decimal("300.01"), Decimal("300"))
+        loop = MonitorLoop(broker, BotConfig(account_price_priority=True, allow_shorts=True), now_provider=_open_now)
+        summary = LoopSummary()
+        chosen = loop._select_candidate([snapshot], summary)
+        assert chosen[1] is True
+        loop._enter(chosen, summary)
+        assert summary.entries[0].side is expected_side
+        assert summary.entries[0].quantity == 1
 
 
 def test_bullish_fallback_gets_shorted() -> None:

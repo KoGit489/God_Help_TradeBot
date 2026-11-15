@@ -90,6 +90,14 @@ def test_screener_row_to_snapshot_converts_ratio_to_percent() -> None:
     assert snapshot.day_high == 3.40
 
 
+def test_account_price_priority_discovers_stocks_above_twenty_dollars():
+    rows = [_row("HIGH", 300, 0.05, 500_000, 2.5, 290, 310)]
+    broker = _broker(rows, {"HIGH": Quote("HIGH", Decimal("299.99"), Decimal("300.01"), Decimal("300"))})
+    assert auto_screen_snapshots(broker, BotConfig()) == []
+    result = auto_screen_snapshots(broker, BotConfig(account_price_priority=True))
+    assert result[0].symbol == "HIGH"
+
+
 def test_screener_row_to_snapshot_rejects_bad_rows() -> None:
     assert screener_row_to_snapshot({"symbol": "", "price": "1.0"}) is None
     assert screener_row_to_snapshot(_row("GOW", 0, 1.0, 1, 1.0, 0.9, 1.1)) is None

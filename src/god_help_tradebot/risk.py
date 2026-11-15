@@ -26,19 +26,21 @@ def build_trade_plan(
 ) -> TradePlan:
     entry = Decimal(str(entry_price))
     stop = Decimal(str(stop_price))
-    if entry < Decimal(str(config.min_symbol_price)) or stop <= 0:
-        raise ValueError("entry must meet the configured minimum price and prices must be positive")
+    if not config.accepts_price(float(entry)) or not stop.is_finite() or stop <= 0:
+        raise ValueError("entry must meet the minimum price and price limit; prices must be positive")
     if stop >= entry:
         raise ValueError("stop_price must be below entry_price for a long trade")
-    if entry > Decimal(str(config.max_symbol_price)):
+    if not config.account_price_priority and entry > Decimal(str(config.max_symbol_price)):
         raise ValueError("entry price exceeds the configured symbol price limit")
 
-    if config.position_pct_of_account > 0 and account_value is not None:
+    if config.account_price_priority and (account_value is None or not Decimal(str(account_value)).is_finite() or account_value <= 0):
+        raise ValueError("current buying power is required for account price priority")
+    if config.account_price_priority or (config.position_pct_of_account > 0 and account_value is not None):
         # Account-percentage mode: deploy that fraction of the account; the stop
         # distance defines the dollar risk, and the bracket caps the downside.
         max_value = (
             Decimal(str(account_value))
-            * Decimal(str(config.position_pct_of_account))
+            * Decimal("1" if config.account_price_priority else str(config.position_pct_of_account))
             * MARKET_ORDER_HEADROOM
         )
         quantity = int((max_value / entry).to_integral_value(rounding=ROUND_DOWN))
@@ -68,17 +70,19 @@ def build_short_plan(
     """Short-side plan: stop sits ABOVE entry, target BELOW. Flipped long math."""
     entry = Decimal(str(entry_price))
     stop = Decimal(str(stop_price))
-    if entry < Decimal(str(config.min_symbol_price)) or stop <= 0:
-        raise ValueError("entry must meet the configured minimum price and prices must be positive")
+    if not config.accepts_price(float(entry)) or not stop.is_finite() or stop <= 0:
+        raise ValueError("entry must meet the minimum price and price limit; prices must be positive")
     if stop <= entry:
         raise ValueError("stop_price must be above entry_price for a short trade")
-    if entry > Decimal(str(config.max_symbol_price)):
+    if not config.account_price_priority and entry > Decimal(str(config.max_symbol_price)):
         raise ValueError("entry price exceeds the configured symbol price limit")
 
-    if config.position_pct_of_account > 0 and account_value is not None:
+    if config.account_price_priority and (account_value is None or not Decimal(str(account_value)).is_finite() or account_value <= 0):
+        raise ValueError("current buying power is required for account price priority")
+    if config.account_price_priority or (config.position_pct_of_account > 0 and account_value is not None):
         max_value = (
             Decimal(str(account_value))
-            * Decimal(str(config.position_pct_of_account))
+            * Decimal("1" if config.account_price_priority else str(config.position_pct_of_account))
             * MARKET_ORDER_HEADROOM
         )
         quantity = int((max_value / entry).to_integral_value(rounding=ROUND_DOWN))

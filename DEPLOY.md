@@ -89,6 +89,37 @@ journalctl -u tradebot -f     # watch logs live
 
 ## Safety notes
 
+### Account-price-priority mode
+
+Set `account_price_priority` to `true` in `bot_config.json` to ignore the legacy
+`min_symbol_price` / `max_symbol_price` interval and fixed dollar-risk/value caps.
+Normal candidates are ranked by descending stock price, then screen score, while
+retaining confirmation, trend, spread, volume, timing, and recovery gates. The
+bounded discovery scanner is not an exhaustive scan of every US stock.
+
+The bot fetches current buying power before selection and again before entry,
+uses 98% of it for sizing, rounds down to whole shares, and retains the 199,999
+share limit. Long sizing uses the latest ask; short sizing uses the latest bid.
+Missing or nonpositive buying power blocks entries, with no fixed-budget fallback.
+Whole shares, the share cap, market-price changes, and broker margin rules can
+leave funds unused or cause rejection. Margin buying power may include leverage;
+it is not the cash balance or equity. Full-budget sizing is highly concentrated.
+
+Fallback retains its existing relaxed filters and first-hour/tape protections.
+In this mode, highest affordable price takes priority, with weakest screen score
+breaking same-price ties when `paradox_fallback` is enabled. Bullish fallback
+reads are shorted; bearish fallback reads are bought. Weakest score is a heuristic,
+not a measured probability of loss. Buying-power eligibility is not proof that
+a particular stock is borrowable or its short margin requirement is satisfied.
+
+To enable shorts, set `allow_shorts` to `true` and set `WEBULL_ACCOUNT_ID` in the
+service environment to the exact sandbox margin account ID returned by OpenAPI.
+Startup requires a matching account with `account_type=MARGIN`; an unknown type
+or cash account blocks startup. No automatic account switching is performed.
+Confirm the sandbox account has no positions or working orders before changing
+accounts; preserve and reconcile local recovery state instead of deleting it.
+Live order submission remains disabled.
+
 - Penny-stock entries require valid live bid/ask prices and a spread within the
   configured limit, but no longer require displayed bid/ask sizes. This can
   increase entry attempts when size fields are absent; it does not guarantee a

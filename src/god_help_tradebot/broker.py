@@ -240,6 +240,10 @@ class WebullSandboxBroker:
             (a for a in accounts if configured and str(a.get("account_id")) == str(configured)),
             None,
         )
+        if configured and chosen is None:
+            raise RuntimeError("Configured Webull sandbox account ID is not available for these API credentials")
+        if not configured and len(accounts) > 1:
+            raise RuntimeError("Multiple sandbox accounts; set WEBULL_ACCOUNT_ID explicitly")
         if chosen is None and accounts:
             chosen = accounts[0]
         account_id = str(chosen.get("account_id")) if chosen else ""
@@ -247,6 +251,17 @@ class WebullSandboxBroker:
             raise RuntimeError("No sandbox accounts are available for this API key")
         self._resolved_account_id = account_id
         return account_id
+
+    def assert_margin_account(self) -> None:
+        self._require_session()
+        if not self.session.account_id:
+            raise RuntimeError("Shorting requires an explicit WEBULL_ACCOUNT_ID for the sandbox margin account")
+        account_id = self._resolve_account_id()
+        response = self.session.trade_client.account_v2.get_account_list()
+        accounts = _payload_records(response)
+        account = next((item for item in accounts if str(item.get("account_id")) == account_id), None)
+        if account is None or str(account.get("account_type", "")).upper() != "MARGIN":
+            raise RuntimeError("Configured sandbox account is not confirmed as MARGIN; shorting blocked")
 
     def _validate_order_params(
         self,

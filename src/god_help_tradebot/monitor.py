@@ -125,6 +125,7 @@ class MonitorLoop:
         self._pending_limit: dict[str, Any] | None = None
         # Live quote captured by the pre-entry quote and spread checks.
         self._entry_quote: Quote | None = None
+        self._selection_budget: Decimal | None = None
         # Order bookkeeping for outcome logging: entry/exit orders we submitted,
         # fills already logged, and entry fill prices for P&L math.
         self._entry_order_ids: set[int] = set()
@@ -595,8 +596,31 @@ class MonitorLoop:
         Returns (profiled_candidate, is_fallback) or None when nothing qualifies.
         """
         awaiting_confirmation = False
+        self._selection_budget = None
+        if self.config.account_price_priority:
+            from .risk import MARKET_ORDER_HEADROOM
+
+            buying_power = self._account_value()
+            if buying_power is None or not Decimal(str(buying_power)).is_finite() or buying_power <= 0:
+                summary.events.append(LoopEvent("sizing_blocked", "account", "current buying power unavailable"))
+                return None
+            budget = Decimal(str(buying_power)) * MARKET_ORDER_HEADROOM
+            self._selection_budget = budget
+            snapshots = [snapshot for snapshot in snapshots if self.config.accepts_price(snapshot.price)
+                         and self.config.accepts_price(snapshot.ask)
+                         and self.config.accepts_price(snapshot.bid)
+                         and 0 < Decimal(str(snapshot.ask)) <= budget
+                         and Decimal(str(snapshot.price)) <= budget]
         for profiled in self._ranked_profiles(snapshots):
             symbol = profiled.candidate.snapshot.symbol
+            if self.config.account_price_priority:
+                direction = "short" if profiled.profile in ("fade", "loser") else "long"
+                if not self._spread_ok_at_entry(symbol, summary) or not self._entry_gates_pass(symbol, direction, summary):
+                    continue
+                if self._entry_quote is not None:
+                    execution_price = self._entry_quote.bid if direction == "short" else self._entry_quote.ask
+                    if execution_price > budget:
+                        continue
             if self._confirm_budget_used >= self.config.max_confirmations_per_cycle:
                 summary.events.append(
                     LoopEvent("confirmation_budget", symbol, "deep-check budget spent; resumes next poll")
@@ -690,6 +714,8 @@ class MonitorLoop:
         # one. Within each profile, the best score wins.
         priority = {"prepop": 0, "momentum": 1, "fade": 2, "loser": 3, "fallback": 9}
         combined.sort(key=lambda item: (priority.get(item.profile, 9), -item.candidate.score))
+        if self.config.account_price_priority:
+            combined.sort(key=lambda item: (-item.candidate.snapshot.price, -item.candidate.score, priority.get(item.profile, 9)))
         return combined
 
     def _best_odds_fallback(
@@ -725,6 +751,34 @@ class MonitorLoop:
         # target (screens sort best-first, so take the tail). With-grain mode
         # wants the strongest survivor, as before.
         weakest = self.config.paradox_fallback
+        if self.config.account_price_priority:
+            candidates = [(candidate, "fallback") for candidate in bulls] + [
+                (candidate, "fallback_loser") for candidate in bears
+            ]
+            if not candidates:
+                return None
+            candidates.sort(key=lambda item: (-item[0].snapshot.price, item[0].score if weakest else -item[0].score))
+            selected = None
+            for candidate, profile in candidates:
+                short = (profile == "fallback" if weakest else profile == "fallback_loser")
+                if short and not self.allow_shorts:
+                    continue
+                if not self._spread_ok_at_entry(candidate.snapshot.symbol, summary):
+                    continue
+                if self._selection_budget is not None and self._entry_quote is not None:
+                    execution_price = self._entry_quote.bid if short else self._entry_quote.ask
+                    if execution_price > self._selection_budget:
+                        continue
+                if weakest and not self._paradox_tape_ok(candidate.snapshot.symbol, "short" if short else "long", summary):
+                    continue
+                selected = candidate, profile
+                break
+            if selected is None:
+                return None
+            chosen, profile = selected
+            summary.events.append(LoopEvent("fallback_entry_candidate", chosen.snapshot.symbol,
+                                            "highest-priced affordable fallback; inverse execution when enabled"))
+            return ProfiledCandidate(chosen, profile), True
         best_bull = (bulls[-1] if weakest else bulls[0]) if bulls else None
         best_bear = (bears[-1] if weakest else bears[0]) if bears else None
         if best_bull is None and best_bear is None:
@@ -1052,12 +1106,16 @@ class MonitorLoop:
             return
         # Fixed-percentage bracket: works at the open before a day's range exists.
         entry = Decimal(str(snapshot.price))
+        if self.config.account_price_priority:
+            entry = self._entry_quote.ask if self._entry_quote is not None else Decimal(str(snapshot.ask))
         stop_price = entry * (Decimal("1") - Decimal(str(self.config.stop_pct)))
         try:
             plan = build_trade_plan(
-                snapshot.price, float(stop_price), self.config, account_value=self._account_value()
+                float(entry), float(stop_price), self.config, account_value=self._account_value()
             )
         except ValueError:
+            if self.config.account_price_priority:
+                summary.events.append(LoopEvent("sizing_blocked", snapshot.symbol, "refreshed buying power cannot support this entry"))
             return
         try:
             order = self.broker.submit_order(
@@ -1109,12 +1167,16 @@ class MonitorLoop:
             return
         # Fixed-percentage bracket: stop 10% above entry, target 30% below.
         entry = Decimal(str(snapshot.price))
+        if self.config.account_price_priority:
+            entry = self._entry_quote.bid if self._entry_quote is not None else Decimal(str(snapshot.bid))
         stop_price = entry * (Decimal("1") + Decimal(str(self.config.stop_pct)))
         try:
             plan = build_short_plan(
-                snapshot.price, float(stop_price), self.config, account_value=self._account_value()
+                float(entry), float(stop_price), self.config, account_value=self._account_value()
             )
         except ValueError:
+            if self.config.account_price_priority:
+                summary.events.append(LoopEvent("sizing_blocked", snapshot.symbol, "refreshed buying power cannot support this short entry"))
             return
         try:
             order = self.broker.submit_order(

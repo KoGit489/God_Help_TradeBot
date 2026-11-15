@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from math import isfinite
 
 
 @dataclass(frozen=True)
@@ -7,6 +8,7 @@ class BotConfig:
 
     min_symbol_price: float = 1.0
     max_symbol_price: float = 20.0
+    account_price_priority: bool = False
     risk_per_trade_usd: float = 25.0
     reward_multiple: float = 3.0
     max_position_value_usd: float = 500.0
@@ -64,6 +66,11 @@ class BotConfig:
     study_interval_days: int = 5
     study_target_winning_days: int = 4
     study_auto_improve: bool = True
+
+    def accepts_price(self, price: float) -> bool:
+        return isfinite(price) and price > 0 and (
+            self.account_price_priority or self.min_symbol_price <= price <= self.max_symbol_price
+        )
 
     def __post_init__(self) -> None:
         if self.min_symbol_price <= 0:
