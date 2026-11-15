@@ -227,3 +227,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+equity_performance.json
+equity_performance.json.tmp

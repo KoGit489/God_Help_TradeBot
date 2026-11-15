@@ -2,6 +2,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from god_help_tradebot.monitor import LoopEvent
 
 from god_help_tradebot import BotConfig
 from god_help_tradebot import runner
@@ -83,3 +84,40 @@ def test_startup_reports_account_buying_power_before_polling(monkeypatch, tmp_pa
     assert calls == ["balance"]
     assert "account_buying_power" in caplog.text
     assert expected in caplog.text
+
+
+def test_continuous_review_runner_bounds_recent_events(monkeypatch, tmp_path):
+    class AccountBroker(_Broker):
+        @classmethod
+        def from_env(cls):
+            return cls()
+
+        def _resolve_account_id(self):
+            return "test-account"
+
+        def assert_no_remote_open_orders(self, **kwargs):
+            pass
+
+    class BusyLoop(_Loop):
+        def run_once(self, summary):
+            summary.polls += 1
+            summary.events.extend([LoopEvent("test", "TEST", "event")] * 1500)
+            return summary
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runner, "WebullSandboxBroker", AccountBroker)
+    monkeypatch.setattr(runner, "MonitorLoop", BusyLoop)
+    monkeypatch.setattr(runner, "_setup_logging", lambda path: logging.getLogger("test-bounded-events"))
+    monkeypatch.setattr(runner, "_maybe_run_study", lambda *args: None)
+    monkeypatch.setattr(runner.signal, "signal", lambda *args: None)
+    monkeypatch.setattr("time.sleep", lambda *args: None)
+    stop = iter([False, True])
+    result = runner.run_bot(config=BotConfig(), record_data=False, stop_flag=lambda: next(stop))
+    assert result.polls == 1
+    assert len(result.events) == 1000
+
+
+def test_actual_trade_review_disables_automatic_replay_study(monkeypatch):
+    monkeypatch.setattr(runner, "run_study", lambda *args, **kwargs: pytest.fail("must not replay during actual-trade review"))
+    runner._maybe_run_study(logging.getLogger("test-review"), BotConfig(trade_review_enabled=True),
+                            "unused", "unused", "unused")

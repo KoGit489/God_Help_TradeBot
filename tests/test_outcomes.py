@@ -2,12 +2,163 @@
 
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
 
 from god_help_tradebot import BotConfig, MonitorLoop, PaperBroker, Quote
 from god_help_tradebot.monitor import ExitPlan
 from god_help_tradebot.paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position
 from god_help_tradebot.schedule import EASTERN
 from god_help_tradebot.screen import MarketSnapshot
+from god_help_tradebot.state import EquityPerformanceStore
+from god_help_tradebot.broker import WebullSandboxBroker
+
+
+def test_four_of_five_keeps_picking_gates_and_reviews_each_batch_once(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    ledger.data["trades"] = [{"outcome": "win" if number < 4 else "loss"} for number in range(5)]
+    _, reviews = ledger.finalize({}, _open_now(), BotConfig(), 0.5)
+    assert reviews[0]["wins"] == 4
+    assert reviews[0]["changes"] == {}
+    assert ledger.finalize({}, _open_now(), BotConfig(), 0.5)[1] == []
+    ledger.data["trades"].extend([{"outcome": "flat"}] * 5)
+    _, reviews = ledger.finalize({}, _open_now(), BotConfig(), 0.5)
+    assert reviews[0]["through_trade"] == 10
+    assert reviews[0]["wins"] == 0
+
+
+def test_missed_trade_target_at_tightening_limits_pauses_new_entries(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    ledger.data["trades"] = [{"outcome": "loss"}] * 5
+    config = BotConfig(min_relative_volume=5, min_signals_present=4, max_spread_percent=0.3)
+    ledger.finalize({}, _open_now(), config, 0.90)
+    assert ledger.data["paused"] is True
+
+
+def test_unpriced_fill_and_account_mismatch_require_reconciliation(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    order = PaperOrder(1, "TEST", OrderSide.BUY, 10, OrderType.MARKET,
+                       filled_quantity=5, client_order_id="entry")
+    ledger.record_fill(order, "ENTRY", _open_now())
+    assert ledger.data["paused"] is True
+    assert ledger.data["trades"] == []
+    with pytest.raises(RuntimeError, match="another account"):
+        EquityPerformanceStore(ledger.path, "different-account")
+
+
+def test_larger_partial_fill_without_average_does_not_reuse_old_price(tmp_path):
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    order = PaperOrder(1, "TEST", OrderSide.BUY, 100, OrderType.MARKET, client_order_id="entry")
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    ledger.track_order(order, "ENTRY")
+    broker.apply_order_status(order, {"status": "PARTIAL_FILLED", "filled_quantity": "30", "filled_avg_price": "10"})
+    ledger.record_fill(order, "ENTRY", _open_now())
+    broker.apply_order_status(order, {"status": "FILLED", "filled_quantity": "100"})
+    assert order.fill_price is None
+    ledger.record_fill(order, "ENTRY", _open_now())
+    assert ledger.data["paused"] is True
+    assert ledger.data["active"]["TEST"]["entry_quantity"] == 30
+
+
+def test_entry_position_reporting_lag_is_not_a_completed_trade(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    ledger.record_fill(PaperOrder(1, "TEST", OrderSide.BUY, 10, OrderType.MARKET,
+                                 status=OrderStatus.FILLED, fill_price=Decimal("10"), client_order_id="entry"), "ENTRY", _open_now())
+    assert ledger.finalize({}, _open_now(), BotConfig(), 0.5)[0] == []
+    assert not ledger.data["paused"]
+
+
+def test_performance_ledger_is_created_at_startup_and_corruption_blocks_load(tmp_path):
+    path = tmp_path / "performance.json"
+    ledger = EquityPerformanceStore(path, "test-account")
+    assert path.exists()
+    assert ledger.data["trades"] == []
+    path.write_text("invalid json", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unreadable"):
+        EquityPerformanceStore(path, "test-account")
+    assert path.read_text(encoding="utf-8") == "invalid json"
+
+
+def test_pending_exit_recovers_cumulative_fill_after_restart(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    entry = PaperOrder(1, "TEST", OrderSide.BUY, 100, OrderType.MARKET,
+                       status=OrderStatus.FILLED, fill_price=Decimal("10"), client_order_id="entry")
+    ledger.record_fill(entry, "ENTRY", _open_now())
+    exit_order = PaperOrder(2, "TEST", OrderSide.SELL, 100, OrderType.MARKET,
+                            filled_quantity=30, fill_price=Decimal("11"), client_order_id="exit")
+    ledger.track_order(exit_order, "EXIT")
+    ledger.record_fill(exit_order, "EXIT", _open_now())
+    ledger = EquityPerformanceStore(ledger.path, "test-account")
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.session = SimpleNamespace()
+    broker._orders = {}
+    broker._next_order_id = 1
+    broker.get_order_status = lambda client_id: {"status": "FILLED", "filled_quantity": "100", "filled_avg_price": "11"}
+    broker.get_positions = lambda: {}
+    loop = MonitorLoop(broker, performance_store=ledger, now_provider=_open_now, flatten_before_close=False)
+    result = loop.run_once()
+    assert not any(event.kind == "error" for event in result.events)
+    assert len(ledger.data["trades"]) == 1
+    assert ledger.data["trades"][0]["realized_pnl_usd"] == "100.00"
+    assert ledger.recovery_ids == frozenset()
+
+
+def test_review_pause_does_not_disable_existing_position_exit(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    ledger.record_fill(PaperOrder(1, "TEST", OrderSide.BUY, 10, OrderType.MARKET,
+                                 status=OrderStatus.FILLED, fill_price=Decimal("10"), client_order_id="entry"), "ENTRY", _open_now())
+    ledger.data["paused"] = True
+    broker = PaperBroker(1_000)
+    broker.positions["TEST"] = Position(10, Decimal("10"))
+    broker.last_quotes["TEST"] = Quote("TEST", Decimal("13"), Decimal("13.01"), Decimal("13"))
+    loop = MonitorLoop(broker, performance_store=ledger, now_provider=_open_now,
+                       allow_entries=True, flatten_before_close=False)
+    result = loop.run_once()
+    assert len(result.exits) == 1
+    assert not result.entries
+
+
+def test_fill_ledger_counts_one_trade_after_split_exit_and_survives_restart(tmp_path):
+    path = tmp_path / "performance.json"
+    ledger = EquityPerformanceStore(path, "test-account")
+    now = _open_now()
+    entry = PaperOrder(1, "TEST", OrderSide.BUY, 100, OrderType.MARKET,
+                       status=OrderStatus.FILLED, fill_price=Decimal("10"), client_order_id="entry")
+    ledger.record_fill(entry, "ENTRY", now)
+    first = PaperOrder(2, "TEST", OrderSide.SELL, 40, OrderType.MARKET,
+                       status=OrderStatus.FILLED, fill_price=Decimal("11"), client_order_id="exit-1")
+    ledger.record_fill(first, "EXIT", now)
+    assert ledger.finalize({"TEST": Position(60, Decimal("10"))}, now, BotConfig(), 0.5)[0] == []
+    ledger = EquityPerformanceStore(path, "test-account")
+    ledger.record_fill(first, "EXIT", now)
+    last = PaperOrder(3, "TEST", OrderSide.SELL, 60, OrderType.MARKET,
+                      status=OrderStatus.FILLED, fill_price=Decimal("9"), client_order_id="exit-2")
+    ledger.record_fill(last, "EXIT", now)
+    completed, _ = ledger.finalize({}, now, BotConfig(), 0.5)
+    assert len(completed) == 1
+    assert completed[0]["realized_pnl_usd"] == "-20.00"
+    assert ledger.finalize({}, now, BotConfig(), 0.5)[0] == []
+
+
+def test_five_completed_trades_below_four_wins_tighten_picking(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    now = _open_now()
+    for number in range(5):
+        entry = PaperOrder(number * 2, "TEST", OrderSide.SHORT, 10, OrderType.MARKET,
+                           status=OrderStatus.FILLED, fill_price=Decimal("10"), client_order_id=f"entry-{number}")
+        exit_order = PaperOrder(number * 2 + 1, "TEST", OrderSide.BUY, 10, OrderType.MARKET,
+                                status=OrderStatus.FILLED, fill_price=Decimal("9" if number < 3 else "11"), client_order_id=f"exit-{number}")
+        ledger.record_fill(entry, "ENTRY", now)
+        ledger.record_fill(exit_order, "EXIT", now)
+        _, reviews = ledger.finalize({}, now, BotConfig(), 0.5)
+        assert len(reviews) == (1 if number == 4 else 0)
+    assert reviews[0]["wins"] == 3
+    assert ledger.effective_config(BotConfig()).min_relative_volume == 2.25
+    assert ledger.data["adaptive"]["min_confirmation_score"] == 0.53
+    ledger = EquityPerformanceStore(ledger.path, "test-account")
+    assert len(ledger.data["trades"]) == 5
+    assert ledger.data["reviewed_count"] == 5
 
 
 def _open_now() -> datetime:

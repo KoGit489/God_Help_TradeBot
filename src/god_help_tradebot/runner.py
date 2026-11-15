@@ -19,7 +19,7 @@ from .config import BotConfig
 from .confirm import confirm_candidate
 from .monitor import LoopEvent, LoopSummary, MonitorLoop
 from .recorder import SessionRecorder, list_recorded_days
-from .state import StateStore
+from .state import StateStore, EquityPerformanceStore
 from .study import load_study_state, run_study, save_study_state, write_config_file
 from .schedule import get_trading_session
 
@@ -76,7 +76,14 @@ def run_bot(
         raise RuntimeError("run_bot is sandbox-only; live mode is not enabled")
     if config.allow_shorts:
         broker.assert_margin_account()
-    broker.assert_no_remote_open_orders()
+    performance_store = None
+    if config.trade_review_enabled and isinstance(broker, WebullSandboxBroker):
+        performance_store = EquityPerformanceStore("equity_performance.json", broker._resolve_account_id())
+        logger.info("[trade_review_ready] sandbox: completed=%s reviewed=%s target=4/5 paused=%s",
+                len(performance_store.data["trades"]), performance_store.data["reviewed_count"], performance_store.data["paused"])
+        broker.assert_no_remote_open_orders(allowed_client_order_ids=performance_store.recovery_ids)
+    else:
+        broker.assert_no_remote_open_orders()
 
     loop = MonitorLoop(
         broker,
@@ -86,6 +93,7 @@ def run_bot(
         allow_entries=allow_entries,
         use_events=use_events,
         state_store=StateStore(state_file),
+        performance_store=performance_store,
         recorder=SessionRecorder(data_dir) if record_data else None,
         poll_seconds=poll_seconds,
         max_polls=max_polls,
@@ -121,6 +129,9 @@ def run_bot(
                 break
             loop.run_once(summary)
             seen_events = _log_events(logger, summary, seen_events)
+            if performance_store is not None and max_polls is None and len(summary.events) > 1000:
+                del summary.events[:-1000]
+                seen_events = len(summary.events)
             if loop._consecutive_errors >= loop.max_consecutive_errors:
                 logger.error("halting after %s consecutive errors", loop._consecutive_errors)
                 halted_on_errors = True
@@ -158,6 +169,8 @@ def _maybe_run_study(
     config_file: str | Path,
 ) -> None:
     """After the close on every Nth recorded day, grade the window and self-improve."""
+    if config.trade_review_enabled:
+        return
     from datetime import datetime
 
     from .schedule import EASTERN
@@ -179,7 +192,7 @@ def _maybe_run_study(
         data_dir=data_dir,
         interval_days=config.study_interval_days,
         target_winning_days=config.study_target_winning_days,
-        auto_improve=config.study_auto_improve,
+        auto_improve=config.study_auto_improve and not config.trade_review_enabled,
         config_writer=lambda improved: write_config_file(improved, config_file),
     )
     logger.info(

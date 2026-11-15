@@ -89,6 +89,38 @@ journalctl -u tradebot -f     # watch logs live
 
 ## Safety notes
 
+### Actual five-trade review
+
+`trade_review_enabled=true` (default) maintains `equity_performance.json` for the
+configured sandbox API account. This is separate from recorded-day replay study.
+It records executed entry/exit prices and quantities, gross realized P&L, outcomes,
+pending client order IDs, and review history. Source quote prices are not stored
+in this ledger. Existing journal logs are not imported as historical trades.
+
+Each new batch of five completed trades must contain at least four positive-P&L
+winners. Flat trades count as non-winners; no-trade days do not count, and split
+or partial exits count as one trade only after matching exits and broker flatness
+are confirmed. Pending orders and cumulative fill checkpoints survive restarts.
+Unrelated remote orders still block startup; an account mismatch or corrupt ledger
+requires manual reconciliation. A crash before an acknowledged order ID is saved
+can still require manual order reconciliation; do not bypass that interlock.
+
+Below 4/5, the policy tightens relative-volume quorum, available signal count,
+entry spread, and confirmation-score gates with bounded steps. The changes take
+effect in the running loop and persist across restarts; fallback volume gates
+tighten too, while price priority and inverse execution remain. At all tightening
+limits, another missed target pauses new entries, not management of existing
+positions. Missing execution prices or disappearing positions without matching
+fills also require manual reconciliation; they are not invented as wins/losses.
+
+Keep and back up the ledger across updates. Do not delete it when resetting the
+paper account or changing account IDs; reconcile/archive it deliberately first.
+The automatic replay study is disabled while actual-trade review is enabled;
+recordings remain available for manual analysis. Five trades are a very small
+sample. Tightening is a heuristic policy, not verified improvement or a guarantee
+of 80% wins, profitability, or durability across future market regimes. Fees and
+borrow costs are not included in the ledger's gross P&L.
+
 ### Account-price-priority mode
 
 Set `account_price_priority` to `true` in `bot_config.json` to ignore the legacy

@@ -608,20 +608,35 @@ class WebullSandboxBroker:
             record = self.get_order_status(order.client_order_id)
             if record is None:
                 continue
-            mapped = WEBULL_STATUS_MAP.get(str(record.get("status", "")).upper())
-            if mapped is OrderStatus.FILLED:
-                order.status = OrderStatus.FILLED
-                filled_avg = record.get("filled_avg_price") or record.get("avg_price")
-                if filled_avg not in (None, ""):
-                    order.fill_price = Decimal(str(filled_avg))
-            elif mapped is OrderStatus.CANCELED:
-                order.status = OrderStatus.CANCELED
+            self.apply_order_status(order, record)
+
+    def apply_order_status(self, order: PaperOrder, record: dict[str, Any]) -> None:
+        mapped = WEBULL_STATUS_MAP.get(str(record.get("status", "")).upper())
+        filled = _decimal_field(record, "filled_quantity", "filled_qty",
+                                default=Decimal(order.quantity if mapped is OrderStatus.FILLED else order.filled_quantity))
+        if not filled.is_finite() or filled != int(filled) or not order.filled_quantity <= filled <= order.quantity:
+            raise RuntimeError("Invalid broker filled quantity; order reconciliation required")
+        average = record.get("filled_avg_price") or record.get("avg_price")
+        if average in (None, "") and filled > order.filled_quantity:
+            order.fill_price = None
+        order.filled_quantity = int(filled)
+        if average not in (None, "") and filled:
+            order.fill_price = Decimal(str(average))
+        if mapped is not None:
+            order.status = mapped
+
+    def restore_tracked_order(self, client_order_id: str, record: dict[str, Any]) -> PaperOrder:
+        order = PaperOrder(self._next_order_id, record["symbol"], OrderSide(record["side"]),
+                           record["quantity"], OrderType.MARKET, client_order_id=client_order_id)
+        self._orders[order.order_id] = order
+        self._next_order_id += 1
+        return order
 
     def open_orders(self) -> list[PaperOrder]:
         """Locally tracked orders still open after the latest sync."""
         return [o for o in self._orders.values() if o.status is OrderStatus.OPEN]
 
-    def assert_no_remote_open_orders(self) -> None:
+    def assert_no_remote_open_orders(self, *, allowed_client_order_ids: frozenset[str] = frozenset()) -> None:
         """Block startup rather than duplicate orders lost from the local cache."""
         self._require_session()
         response = self.session.trade_client.order_v3.get_order_open(
@@ -632,7 +647,7 @@ class WebullSandboxBroker:
         records = response.json()
         if not isinstance(records, list):
             raise RuntimeError("Unexpected open-order response; startup blocked")
-        if records:
+        if any(not isinstance(record, dict) or record.get("client_order_id") not in allowed_client_order_ids for record in records):
             raise RuntimeError(
                 "Server-side working orders exist; startup blocked to prevent duplicates. "
                 "Resolve existing orders before restarting."

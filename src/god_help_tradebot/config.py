@@ -66,6 +66,7 @@ class BotConfig:
     study_interval_days: int = 5
     study_target_winning_days: int = 4
     study_auto_improve: bool = True
+    trade_review_enabled: bool = True
 
     def accepts_price(self, price: float) -> bool:
         return isfinite(price) and price > 0 and (

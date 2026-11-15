@@ -86,6 +86,7 @@ class MonitorLoop:
         error_backoff_seconds: float = 30.0,
         allow_shorts: bool | None = None,
         recorder: Any | None = None,
+        performance_store: Any | None = None,
     ) -> None:
         self.broker = broker
         self.config = config or BotConfig()
@@ -104,6 +105,9 @@ class MonitorLoop:
         self.error_backoff_seconds = error_backoff_seconds
         self.allow_shorts = self.config.allow_shorts if allow_shorts is None else allow_shorts
         self.recorder = recorder
+        self.performance_store = performance_store
+        self._base_config = self.config
+        self._base_confirmation_score = min_confirmation_score
         self._events_client: Any | None = None
         self._market_news: Any | None = None
         self._consecutive_errors = 0
@@ -151,6 +155,30 @@ class MonitorLoop:
         # Restore persisted exit plans so a restart never strands a position.
         if self.state_store is not None and not self.exit_plans:
             self.exit_plans = dict(self.state_store.load())
+        if self.performance_store is not None:
+            self.config = self.performance_store.effective_config(self._base_config)
+            self.min_confirmation_score = max(self._base_confirmation_score, self.performance_store.data["adaptive"].get("min_confirmation_score", 0))
+            for symbol, trade in self.performance_store.data["active"].items():
+                self._entry_fills[symbol] = Decimal(trade["entry_notional"]) / trade["entry_quantity"]
+                remaining = trade["entry_quantity"] - trade["exit_quantity"]
+                if symbol not in self.exit_plans and remaining > 0:
+                    self.exit_plans[symbol] = self._fill_exit_plan(symbol, self._entry_fills[symbol], remaining, trade["direction"])
+                    self._persist_plans()
+            for client_id, record in self.performance_store.data["orders"].items():
+                order = self.broker.restore_tracked_order(client_id, record)
+                checkpoint = self.performance_store.data["fills"].get(client_id)
+                if checkpoint is not None and checkpoint["quantity"]:
+                    order.filled_quantity = checkpoint["quantity"]
+                    order.fill_price = Decimal(checkpoint["notional"]) / checkpoint["quantity"]
+                if record["role"] == "ENTRY":
+                    self._entry_order_ids.add(order.order_id)
+                    self._pending_entry = order.symbol
+                    self._pending_limit = {"order_id": order.order_id, "symbol": order.symbol, "side": order.side,
+                                           "quantity": order.quantity, "polls": 0}
+                else:
+                    self._exit_order_ids.add(order.order_id)
+                    self._pending_exits[order.symbol] = {"order_id": order.order_id, "side": order.side,
+                                                        "quantity": order.quantity, "polls": 0}
 
     def run_once(self, summary: LoopSummary | None = None) -> LoopSummary:
         """Run one poll cycle; returns the cumulative summary.
@@ -176,6 +204,16 @@ class MonitorLoop:
         self._reconcile_pending_entry(summary)
         self._log_fills(summary)
         positions = self.broker.get_positions()
+        if self.performance_store is not None:
+            completed, reviews = self.performance_store.finalize(positions, self._now(), self._base_config, self._base_confirmation_score)
+            for trade in completed:
+                summary.events.append(LoopEvent("trade_completed", trade["symbol"],
+                                                f"P&L ${trade['realized_pnl_usd']} [{trade['outcome']}]"))
+            for review in reviews:
+                summary.events.append(LoopEvent("trade_performance_review", "account",
+                                                f"{review['wins']}/5 winners; target 4/5; tightened={review['changes']}; paused={review['paused']}"))
+            self.config = self.performance_store.effective_config(self._base_config)
+            self.min_confirmation_score = max(self._base_confirmation_score, self.performance_store.data["adaptive"].get("min_confirmation_score", 0))
         for symbol in self._filled_exits_pending_reconcile:
             position = positions.get(symbol)
             if position is None or position.quantity == 0:
@@ -519,6 +557,12 @@ class MonitorLoop:
             self.state_store.save(self.exit_plans)
 
     def _maybe_enter(self, summary: LoopSummary) -> None:
+        if self.performance_store is not None and self.performance_store.data["paused"]:
+            summary.events.append(LoopEvent("trade_review_paused", "account", self.performance_store.data.get("pause_reason", "performance reconciliation required")))
+            return
+        if self.performance_store is not None and self.performance_store.data["active"]:
+            summary.events.append(LoopEvent("trade_reconciliation_wait", "account", "recorded trade not closed; no new entry"))
+            return
         if not self._market_open() or self._in_entry_cooldown():
             return
         if self.config.account_price_priority:
@@ -740,7 +784,7 @@ class MonitorLoop:
             self.config,
             min_change_percent=-5.0,
             max_change_percent=100.0,
-            min_relative_volume=1.0,
+            min_relative_volume=max(1.0, self.config.min_relative_volume / 2) if self.performance_store is not None else 1.0,
             min_average_volume=50_000,
             max_spread_percent=3.0,
         )
@@ -833,6 +877,8 @@ class MonitorLoop:
     def _track_exit(self, symbol: str, order: Any, side: OrderSide, quantity: int) -> None:
         """Register an in-flight exit order: one per symbol, fill-verified."""
         self._exit_order_ids.add(order.order_id)
+        if self.performance_store is not None:
+            self.performance_store.track_order(order, "EXIT")
         self._pending_exits[symbol] = {
             "order_id": order.order_id,
             "side": side,
@@ -935,9 +981,22 @@ class MonitorLoop:
         decision price, and the bracket should guard what we truly paid.
         """
         for order in self._tracked_orders():
+            if self.performance_store is not None:
+                role = "ENTRY" if order.order_id in self._entry_order_ids else "EXIT" if order.order_id in self._exit_order_ids else None
+                if role is not None:
+                    prior = self.performance_store.data["fills"].get(self.performance_store.key(order), {}).get("quantity", 0)
+                    self.performance_store.record_fill(order, role, self._now())
+                    filled = getattr(order, "filled_quantity", 0) or (order.quantity if order.status is OrderStatus.FILLED else 0)
+                    if role == "ENTRY" and filled > prior and order.fill_price is not None:
+                        self._on_entry_filled(order, summary)
+                        if order.status is not OrderStatus.OPEN:
+                            self._logged_fills.add(order.order_id)
             if (
                 order.order_id in self._logged_fills
-                or order.status is not OrderStatus.FILLED
+                or (order.status is not OrderStatus.FILLED and not (
+                    self.performance_store is not None and order.status is OrderStatus.CANCELED
+                    and getattr(order, "filled_quantity", 0) > 0
+                ))
                 or order.fill_price is None
             ):
                 continue
@@ -949,11 +1008,24 @@ class MonitorLoop:
                 continue  # not one of ours (e.g. externally submitted)
             self._logged_fills.add(order.order_id)
 
+    def _fill_exit_plan(self, symbol: str, fill: Decimal, quantity: int, direction: str,
+                        liquidation_requested: bool = False) -> ExitPlan:
+        direction_sign = Decimal("-1" if direction == "short" else "1")
+        return ExitPlan(
+            symbol, quantity,
+            fill * (Decimal("1") + direction_sign * Decimal(str(self.config.target_pct))),
+            fill * (Decimal("1") - direction_sign * Decimal(str(self.config.stop_pct))),
+            direction, liquidation_requested,
+        )
+
     def _on_entry_filled(self, order: Any, summary: LoopSummary) -> None:
         """Record the entry fill and re-anchor the bracket to the true price."""
         fill = order.fill_price
         self._entry_fills[order.symbol] = fill
         plan = self.exit_plans.get(order.symbol)
+        if plan is None and self.performance_store is not None:
+            direction = "short" if order.side is OrderSide.SHORT else "long"
+            plan = self._fill_exit_plan(order.symbol, fill, getattr(order, "filled_quantity", 0) or order.quantity, direction)
         if plan is not None:
             stop_pct = Decimal(str(self.config.stop_pct))
             target_pct = Decimal(str(self.config.target_pct))
@@ -973,26 +1045,27 @@ class MonitorLoop:
             )
             self._persist_plans()
         summary.events.append(
-            LoopEvent("entry_filled", order.symbol, f"filled {order.quantity} @ {fill}; bracket anchored to fill")
+            LoopEvent("entry_filled", order.symbol, f"filled {getattr(order, 'filled_quantity', 0) or order.quantity} @ {fill}; bracket anchored to fill")
         )
 
     def _on_exit_filled(self, order: Any, summary: LoopSummary) -> None:
         """Log the exit fill with the trade's realized dollar P&L."""
         fill = order.fill_price
+        quantity = getattr(order, "filled_quantity", 0) or order.quantity
         self._pending_exits.pop(order.symbol, None)
         self._filled_exits_pending_reconcile.add(order.symbol)
         verb = "covered" if order.side is OrderSide.BUY else "sold"
         entry_price = self._entry_fills.get(order.symbol)
         if entry_price is None:
-            detail = f"{verb} {order.quantity} @ {fill} (entry price unknown)"
+            detail = f"{verb} {quantity} @ {fill} (entry price unknown)"
         else:
             if order.side is OrderSide.SELL:
-                pnl = (fill - entry_price) * order.quantity
+                pnl = (fill - entry_price) * quantity
             else:  # buy-to-cover a short
-                pnl = (entry_price - fill) * order.quantity
+                pnl = (entry_price - fill) * quantity
             sign = "+" if pnl >= 0 else "-"
             outcome = "win" if pnl > 0 else ("loss" if pnl < 0 else "flat")
-            detail = f"{verb} {order.quantity} @ {fill} (entry {entry_price}) P&L {sign}${abs(pnl):,.2f} [{outcome}]"
+            detail = f"{verb} {quantity} @ {fill} (entry {entry_price}) P&L {sign}${abs(pnl):,.2f} [{outcome}]"
         summary.events.append(LoopEvent("exit_filled", order.symbol, detail))
 
     def _cancel_confirmed(self, order_id: int, symbol: str, summary: LoopSummary) -> bool:
@@ -1009,6 +1082,8 @@ class MonitorLoop:
                     order.status = OrderStatus.OPEN
                 record = self.broker.get_order_status(order.client_order_id)
             status = str((record or {}).get("status", "")).upper()
+            if record:
+                self.broker.apply_order_status(order, record)
             if status == "FILLED":
                 order.status = OrderStatus.FILLED
                 price = (record or {}).get("filled_avg_price") or (record or {}).get("avg_price")
@@ -1141,6 +1216,8 @@ class MonitorLoop:
         summary.entries.append(order)
         self._pending_entry = snapshot.symbol
         self._entry_order_ids.add(order.order_id)
+        if self.performance_store is not None:
+            self.performance_store.track_order(order, "ENTRY")
         self._pending_limit = {
             "order_id": order.order_id, "symbol": snapshot.symbol,
             "side": OrderSide.BUY, "quantity": plan.quantity, "polls": 0,
@@ -1200,6 +1277,8 @@ class MonitorLoop:
         summary.entries.append(order)
         self._pending_entry = snapshot.symbol
         self._entry_order_ids.add(order.order_id)
+        if self.performance_store is not None:
+            self.performance_store.track_order(order, "ENTRY")
         self._pending_limit = {
             "order_id": order.order_id, "symbol": snapshot.symbol,
             "side": OrderSide.SHORT, "quantity": plan.quantity, "polls": 0,
@@ -1294,6 +1373,8 @@ class MonitorLoop:
         passed = getattr(report, "passed", None)
         if passed is None and score is not None:
             passed = score >= self.min_confirmation_score
+        elif passed and score is not None and score < self.min_confirmation_score:
+            passed = False
         if passed is None:
             return True
         # Quorum: enough signal groups must have real data behind the score.
