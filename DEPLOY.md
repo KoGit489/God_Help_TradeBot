@@ -6,7 +6,7 @@ Runs the bot 24/7 without your home PC. Sandbox-only; live trading stays off.
 
 - A small VPS (Ubuntu 22.04+). ~$4–6/month from DigitalOcean, Linode/Akamai,
   Vultr, Hetzner, or a free/cheap tier elsewhere. 1 GB RAM is plenty.
-- Your Webull sandbox App Key / App Secret and the Individual Cash account ID.
+- Your Webull sandbox App Key / App Secret and the exact sandbox account ID. Shorting requires a verified sandbox margin account.
 - Your Alpha Vantage API key (optional but recommended for news).
 
 ## 1. Create the server
@@ -26,7 +26,7 @@ apt update && apt install -y python3 python3-pip python3-venv git
 ```bash
 git clone https://github.com/KoGit489/God_Help_TradeBot.git
 cd God_Help_TradeBot
-git checkout Prototype
+git checkout main
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
@@ -123,13 +123,14 @@ borrow costs are not included in the ledger's gross P&L.
 
 ### Scanner recovery
 
-Equity discovery refreshes once per 60 seconds and enriches at most four
-100-symbol quote batches per pass. Webull `INVALID_SYMBOL` quote responses remove
-the named unsupported tickers from the current process cache and retry the valid
-symbols in that batch. HTTP 429 stops further quote/screener requests for that
-cycle and backs off for 300 seconds; it does not count toward the fatal
-consecutive-error halt. Other errors still use the normal halt/restart guard.
-`entry_blocked` events now include the broker's concise rejection reason.
+Equity discovery refreshes once per 60 seconds and starts at most four
+100-symbol quote batches per pass. Each batch gets at most one retry after
+unsupported symbols named by Webull are removed from the current process cache,
+so quote enrichment is capped at eight snapshot requests per pass. Additional
+invalid symbols wait for a later pass. HTTP 429 stops further quote/screener
+requests for that cycle and backs off for 300 seconds; it does not count toward
+the fatal consecutive-error halt. Other errors still use the normal halt/restart
+guard. `entry_blocked` events include a concise rejection reason.
 
 ### Account-price-priority mode
 
@@ -240,16 +241,17 @@ Live order submission remains disabled.
 - Legacy `entry_limit_spread_fraction` and `entry_chase_polls` settings are
   accepted for configuration compatibility but do not alter market-only entries.
 - SDK 3.0.2 documents 200 non-paginated rows per screener ranking. Discovery
-  now uses daily/3-minute/5-minute gainers and losers plus relative-volume,
-  volume, turnover, turnover-rate and amplitude activity lists. With shorts
-  enabled, that is up to 2,200 raw rows, not 2,200 guaranteed unique stocks.
+  uses daily/3-minute/5-minute gainers and losers plus relative-volume, volume,
+  turnover, turnover-rate and amplitude activity lists. With shorts enabled,
+  that is up to 2,200 raw rows, not 2,200 guaranteed unique stocks.
   `screener_list_limit` defaults to 200; an existing lower override still applies.
 - Symbols are deduplicated and price-filtered before quote enrichment. A pass
-  quotes up to 1,200 symbols in 12 batches of 100; the offset rotates through
-  larger eligible pools. Discovery refreshes no more often than every 30
-  seconds. At that cadence, discovery uses at most 24 snapshot calls/minute,
-  leaving headroom below the published sandbox 30/minute limit for entry and
-  exit checks. Other clients sharing the app key consume the same quota.
+  starts up to four 100-symbol batches and makes at most one invalid-symbol
+  retry per batch (eight quote requests maximum). The offset rotates through
+  larger eligible pools; discovery refreshes no more often than every 60
+  seconds. Rate limits remain possible because screeners, confirmations, exits,
+  and other clients sharing the app key also consume API capacity; monitor
+  `[rate_limit_backoff]` events rather than raising scan volume preemptively.
 - `[scan_summary]` reports observed unique, price-eligible and quote-enriched
   counts. Actual coverage depends on API responses, entitlements, overlap and
   failed batches. The confirmation budget remains five per cycle by default.

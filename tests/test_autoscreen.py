@@ -176,6 +176,27 @@ def test_rate_limit_aborts_quote_batches_for_backoff():
     assert len(calls) == 1
 
 
+def test_invalid_symbol_retries_are_limited_to_one_per_batch():
+    broker = _broker([], {})
+    calls = []
+
+    def get_latest_quotes(symbols):
+        calls.append(list(symbols))
+        raise _InvalidSymbolError(
+            f"INVALID_SYMBOL: The symbols does not exist in the category. [{symbols[0]}]."
+        )
+
+    broker.get_latest_quotes = get_latest_quotes
+    snapshots = [
+        screener_row_to_snapshot(_row(f"BAD{index}", 2.0, 0.05, 500_000, 2.5, 1.9, 2.1))
+        for index in range(400)
+    ]
+
+    assert enrich_with_quotes(broker, snapshots) == []
+    assert len(calls) == 8
+    assert all(len(batch) <= 100 for batch in calls)
+
+
 def test_auto_screen_filters_price_and_change_before_enrichment() -> None:
     rows = [
         _row("TOOEXPENSIVE", 20.01, 1.0, 500_000, 2.5, 19.0, 21.0),

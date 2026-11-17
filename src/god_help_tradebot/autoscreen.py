@@ -25,6 +25,7 @@ MOST_ACTIVE_RANK_TYPE = "RELATIVE_VOLUME_10D"
 SCREENER_MAX_ROWS = 200
 DISCOVERY_REFRESH_SECONDS = 60
 DISCOVERY_QUOTE_BATCHES = 4
+DISCOVERY_MAX_QUOTE_ATTEMPTS_PER_BATCH = 2
 MOVER_RANKS = ("DAY_1", "MIN_3", "MIN_5")
 ACTIVITY_RANKS = ("RELATIVE_VOLUME_10D", "VOLUME", "TURNOVER", "TURNOVER_RATE", "AMPLITUDE")
 
@@ -138,7 +139,7 @@ def enrich_with_quotes(
     for start in range(0, len(candidates), 100):
         batch = candidates[start : start + 100]
         pending = [snapshot for snapshot in batch if snapshot.symbol not in invalid_symbols]
-        for _ in range(9):
+        for _ in range(DISCOVERY_MAX_QUOTE_ATTEMPTS_PER_BATCH):
             if not pending:
                 break
             try:
