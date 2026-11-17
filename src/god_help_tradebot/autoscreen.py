@@ -8,10 +8,11 @@ strategy screener can evaluate spread and liquidity. No trading action is taken 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .broker import WebullSandboxBroker, US_STOCK_CATEGORY
+from .broker import WebullSandboxBroker, US_STOCK_CATEGORY, is_rate_limit_error, webull_error_code
 from .config import BotConfig
 from .paper import Quote
 from .screen import MarketSnapshot
@@ -22,8 +23,8 @@ DESCENDING = "DESC"
 ASCENDING = "ASC"
 MOST_ACTIVE_RANK_TYPE = "RELATIVE_VOLUME_10D"
 SCREENER_MAX_ROWS = 200
-DISCOVERY_REFRESH_SECONDS = 30
-DISCOVERY_QUOTE_BATCHES = 12
+DISCOVERY_REFRESH_SECONDS = 60
+DISCOVERY_QUOTE_BATCHES = 4
 MOVER_RANKS = ("DAY_1", "MIN_3", "MIN_5")
 ACTIVITY_RANKS = ("RELATIVE_VOLUME_10D", "VOLUME", "TURNOVER", "TURNOVER_RATE", "AMPLITUDE")
 
@@ -128,17 +129,48 @@ def enrich_with_quotes(
 ) -> list[MarketSnapshot]:
     """Replace placeholder bid/ask with real quotes, fetched in batches of 100.
 
-    A batch that hits a rate limit or other API error is skipped rather than
-    failing the whole enrichment pass.
+    Invalid symbols are removed and their valid batchmates retried. Rate limits
+    propagate to the loop so it can back off instead of hammering the API.
     """
     candidates = list(snapshots)
     quotes: dict[str, Quote] = {}
+    invalid_symbols: set[str] = getattr(broker, "_invalid_quote_symbols", set())
     for start in range(0, len(candidates), 100):
         batch = candidates[start : start + 100]
-        try:
-            quotes.update(broker.get_latest_quotes([s.symbol for s in batch]))
-        except Exception:
-            continue
+        pending = [snapshot for snapshot in batch if snapshot.symbol not in invalid_symbols]
+        for _ in range(9):
+            if not pending:
+                break
+            try:
+                quotes.update(broker.get_latest_quotes([snapshot.symbol for snapshot in pending]))
+                break
+            except Exception as exc:
+                if is_rate_limit_error(exc):
+                    raise
+                match = re.search(
+                    r"(?:symbols?|symbol)\s+do(?:es)?\s+not\s+exist\s+in\s+the\s+category\.?\s*\[([^\]]+)\]",
+                    str(exc), re.IGNORECASE,
+                )
+                rejected = {value.strip().upper() for value in match.group(1).split(",")} if match else set()
+                newly_rejected = rejected.intersection(snapshot.symbol for snapshot in pending) - invalid_symbols
+                if not newly_rejected:
+                    logging.getLogger("god_help_tradebot").warning(
+                        "[quote_batch_error] symbols=%s code=%s; batch skipped",
+                        len(pending), webull_error_code(exc),
+                    )
+                    break
+                invalid_symbols.update(newly_rejected)
+                try:
+                    setattr(broker, "_invalid_quote_symbols", invalid_symbols)
+                except Exception:
+                    pass
+                logging.getLogger("god_help_tradebot").warning(
+                    "[quote_invalid_symbols] count=%s; retrying remaining batch",
+                    len(newly_rejected),
+                )
+                pending = [snapshot for snapshot in pending if snapshot.symbol not in newly_rejected]
+        else:
+            logging.getLogger("god_help_tradebot").warning("[quote_batch_error] invalid-symbol isolation limit reached")
 
     enriched: list[MarketSnapshot] = []
     for snapshot in candidates:
@@ -219,8 +251,10 @@ def discover_market_snapshots(
         try:
             rows = fetch(broker, limit=config.screener_list_limit, rank_type=rank)
         except Exception as exc:
+            if is_rate_limit_error(exc):
+                raise
             logging.getLogger("god_help_tradebot").warning(
-                "[scan_source_error] %s %s: %s", fetch.__name__, rank, type(exc).__name__
+                "[scan_source_error] %s %s: %s", fetch.__name__, rank, webull_error_code(exc)
             )
             continue
         for row in rows:

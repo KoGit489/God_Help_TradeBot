@@ -121,3 +121,35 @@ def test_actual_trade_review_disables_automatic_replay_study(monkeypatch):
     monkeypatch.setattr(runner, "run_study", lambda *args, **kwargs: pytest.fail("must not replay during actual-trade review"))
     runner._maybe_run_study(logging.getLogger("test-review"), BotConfig(trade_review_enabled=True),
                             "unused", "unused", "unused")
+
+
+def test_runner_sleeps_for_rate_limit_cooldown(monkeypatch, tmp_path):
+    sleeps = []
+
+    class RateLimitedLoop(_Loop):
+        max_consecutive_errors = 5
+        error_backoff_seconds = 300
+        _rate_limit_backoff_active = False
+
+        def run_once(self, summary):
+            summary.polls += 1
+            self._consecutive_errors = 0
+            self._rate_limit_backoff_active = True
+            return summary
+
+    monkeypatch.setattr(runner.WebullSandboxBroker, "from_env", lambda: _Broker())
+    monkeypatch.setattr(runner, "MonitorLoop", RateLimitedLoop)
+    monkeypatch.setattr(runner, "_setup_logging", lambda path: logging.getLogger("test-rate-limit-runner"))
+    monkeypatch.setattr(runner.signal, "signal", lambda signum, handler: None)
+    monkeypatch.setattr(runner, "_maybe_run_study", lambda *args: None)
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+    stopped = {"value": False}
+
+    def stop_after_cooldown():
+        if sleeps:
+            stopped["value"] = True
+        return stopped["value"]
+
+    result = runner.run_bot(config=BotConfig(), record_data=False, stop_flag=stop_after_cooldown)
+    assert result.polls == 1
+    assert sleeps == [300]

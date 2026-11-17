@@ -90,12 +90,16 @@ def test_full_rankings_use_bounded_rotating_quote_batches() -> None:
     first = discover_market_snapshots(broker, BotConfig(), allow_shorts=True)
     assert len(broker.session.data_client.screener.calls) == 11
     assert first.unique_symbols == 2200
-    assert len(first.snapshots) == 1200
-    assert len(batches) == 12
+    assert len(first.snapshots) == 400
+    assert len(batches) == 4
     assert all(len(batch) <= 100 for batch in batches)
 
-    second = discover_market_snapshots(broker, BotConfig(), allow_shorts=True, quote_offset=first.next_offset)
-    assert len({snapshot.symbol for snapshot in first.snapshots + second.snapshots}) == 2200
+    results = [first]
+    for _ in range(5):
+        results.append(discover_market_snapshots(
+            broker, BotConfig(), allow_shorts=True, quote_offset=results[-1].next_offset,
+        ))
+    assert len({snapshot.symbol for result in results for snapshot in result.snapshots}) == 2200
 
 
 def test_overlapping_rankings_are_deduplicated_before_quotes() -> None:
@@ -116,7 +120,7 @@ def test_discovery_refresh_is_throttled_without_sleeping(monkeypatch) -> None:
     loop._gather_snapshots()
     loop._gather_snapshots()
     assert len(batches) == 2
-    clock["now"] += 31
+    clock["now"] += 60
     loop._gather_snapshots()
     assert len(batches) == 4
 

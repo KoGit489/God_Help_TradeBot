@@ -141,7 +141,8 @@ def run_bot(
             _maybe_run_study(logger, config, data_dir, study_state_file, config_file)
             import time
 
-            time.sleep(loop.error_backoff_seconds if loop._consecutive_errors else poll_seconds)
+            backoff = loop._consecutive_errors or getattr(loop, "_rate_limit_backoff_active", False)
+            time.sleep(loop.error_backoff_seconds if backoff else poll_seconds)
     finally:
         for sig, handler in previous_handlers.items():
             try:

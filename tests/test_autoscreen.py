@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from god_help_tradebot import BotConfig, WebullSdkSession, WebullSandboxBroker
 from god_help_tradebot.autoscreen import (
     auto_screen_snapshots,
@@ -18,6 +20,11 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+class _InvalidSymbolError(RuntimeError):
+    http_status = 417
+    error_code = "INVALID_SYMBOL"
 
 
 class _FakeScreener:
@@ -126,6 +133,47 @@ def test_enrich_with_quotes_drops_symbols_without_quotes() -> None:
     snapshot = screener_row_to_snapshot(_row("GOW", 3.18, 1.98, 500_000, 2.5, 2.80, 3.40))
 
     assert enrich_with_quotes(broker, [snapshot]) == []
+
+
+def test_invalid_symbol_does_not_discard_valid_members_of_quote_batch():
+    quotes = {
+        "GOOD1": Quote("GOOD1", Decimal("2.00"), Decimal("2.01"), Decimal("2.00")),
+        "GOOD2": Quote("GOOD2", Decimal("3.00"), Decimal("3.01"), Decimal("3.00")),
+    }
+    broker = _broker([], quotes)
+    calls = []
+
+    def get_latest_quotes(symbols):
+        calls.append(list(symbols))
+        if "BAD" in symbols:
+            raise _InvalidSymbolError("INVALID_SYMBOL: The symbols does not exist in the category. [BAD].")
+        return {symbol: quotes[symbol] for symbol in symbols if symbol in quotes}
+
+    broker.get_latest_quotes = get_latest_quotes
+    snapshots = [screener_row_to_snapshot(_row(symbol, price, 0.05, 500_000, 2.5, price * 0.9, price * 1.1))
+                 for symbol, price in (("GOOD1", 2.0), ("BAD", 2.5), ("GOOD2", 3.0))]
+    enriched = enrich_with_quotes(broker, snapshots)
+    assert [snapshot.symbol for snapshot in enriched] == ["GOOD1", "GOOD2"]
+    assert calls == [["GOOD1", "BAD", "GOOD2"], ["GOOD1", "GOOD2"]]
+    assert broker._invalid_quote_symbols == {"BAD"}
+
+
+def test_rate_limit_aborts_quote_batches_for_backoff():
+    class RateLimitError(RuntimeError):
+        http_status = 429
+
+    broker = _broker([], {})
+    calls = []
+
+    def limited(symbols):
+        calls.append(list(symbols))
+        raise RateLimitError("TOO_MANY_REQUESTS")
+
+    broker.get_latest_quotes = limited
+    snapshots = [screener_row_to_snapshot(_row("GOOD", 2.0, 0.05, 500_000, 2.5, 1.9, 2.1))]
+    with pytest.raises(RateLimitError):
+        enrich_with_quotes(broker, snapshots)
+    assert len(calls) == 1
 
 
 def test_auto_screen_filters_price_and_change_before_enrichment() -> None:

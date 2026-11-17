@@ -173,6 +173,7 @@ class WebullSandboxBroker:
         self.sandbox_mode = resolved_config.sandbox_mode
         self.live_mode = resolved_config.live_mode
         self._quote_cache: dict[str, Quote] = {}
+        self._invalid_quote_symbols: set[str] = set()
         self._resolved_account_id: str | None = None
         self._orders: dict[int, PaperOrder] = {}
         self._next_order_id = 1
@@ -672,6 +673,28 @@ def _payload_records(response: Any) -> list[dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict)]
 
 
+def is_rate_limit_error(error: Exception) -> bool:
+    status = getattr(error, "http_status", getattr(error, "status_code", None))
+    if status is not None and str(status) == "429":
+        return True
+    code = getattr(error, "error_code", getattr(error, "code", ""))
+    text = f"{code} {error}".upper()
+    return "TOO_MANY_REQUESTS" in text or "HTTP STATUS: 429" in text
+
+
+def webull_error_code(error: Exception) -> str:
+    code = getattr(error, "error_code", getattr(error, "code", None))
+    if code:
+        return str(code)[:64]
+    text = str(error)
+    for marker in ("Code: ", "error_code': '", '"error_code": "'):
+        if marker in text:
+            value = text.split(marker, 1)[1].split('"', 1)[0].split("'", 1)[0].split(",", 1)[0]
+            return value[:64]
+    status = getattr(error, "http_status", getattr(error, "status_code", None))
+    return f"HTTP_{status}" if status is not None else type(error).__name__
+
+
 def _decimal_field(
     record: dict[str, Any],
     *names: str,
@@ -701,4 +724,4 @@ def _quote_from_snapshot(record: dict[str, Any]) -> Quote:
     )
 
 
-__all__ = ["BrokerAdapter", "OrderPreview", "WebullSandboxBroker", "WebullSdkSession", "WebullSessionConfig"]
+__all__ = ["BrokerAdapter", "OrderPreview", "WebullSandboxBroker", "WebullSdkSession", "WebullSessionConfig", "is_rate_limit_error", "webull_error_code"]

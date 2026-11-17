@@ -121,6 +121,16 @@ sample. Tightening is a heuristic policy, not verified improvement or a guarante
 of 80% wins, profitability, or durability across future market regimes. Fees and
 borrow costs are not included in the ledger's gross P&L.
 
+### Scanner recovery
+
+Equity discovery refreshes once per 60 seconds and enriches at most four
+100-symbol quote batches per pass. Webull `INVALID_SYMBOL` quote responses remove
+the named unsupported tickers from the current process cache and retry the valid
+symbols in that batch. HTTP 429 stops further quote/screener requests for that
+cycle and backs off for 300 seconds; it does not count toward the fatal
+consecutive-error halt. Other errors still use the normal halt/restart guard.
+`entry_blocked` events now include the broker's concise rejection reason.
+
 ### Account-price-priority mode
 
 Set `account_price_priority` to `true` in `bot_config.json` to ignore the legacy

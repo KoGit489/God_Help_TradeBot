@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Callable
 
-from .broker import BrokerAdapter, WebullSandboxBroker
+from .broker import BrokerAdapter, WebullSandboxBroker, is_rate_limit_error, webull_error_code
 from .config import BotConfig
 from .confirm import confirm_candidate, confirm_candidate_bearish
 from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
@@ -111,6 +111,7 @@ class MonitorLoop:
         self._events_client: Any | None = None
         self._market_news: Any | None = None
         self._consecutive_errors = 0
+        self._rate_limit_backoff_active = False
         # Symbols whose exit was rejected for the current session (e.g. not
         # eligible for overnight trading); retried when the session changes.
         self._exit_blocked: dict[str, str] = {}
@@ -189,8 +190,19 @@ class MonitorLoop:
         try:
             self._run_cycle(summary)
             self._consecutive_errors = 0
+            self._rate_limit_backoff_active = False
+            self.error_backoff_seconds = 30.0
         except Exception as exc:
             summary.polls += 1
+            if is_rate_limit_error(exc):
+                self._consecutive_errors = 0
+                self._rate_limit_backoff_active = True
+                self.error_backoff_seconds = 300.0
+                summary.events.append(LoopEvent(
+                    "rate_limit_backoff", "account",
+                    f"Webull rate limit ({webull_error_code(exc)}); retrying after {self.error_backoff_seconds:.0f}s",
+                ))
+                return summary
             self._consecutive_errors += 1
             summary.events.append(
                 LoopEvent("error", "loop", f"{type(exc).__name__}: {exc} (x{self._consecutive_errors})")
@@ -274,7 +286,7 @@ class MonitorLoop:
             if self.max_polls is not None and summary.polls >= self.max_polls:
                 break
             # Back off longer after errors to ride out transient API failures.
-            sleep_for = self.error_backoff_seconds if self._consecutive_errors else self.poll_seconds
+            sleep_for = self.error_backoff_seconds if self._consecutive_errors or self._rate_limit_backoff_active else self.poll_seconds
             time.sleep(sleep_for)
         return summary
 
@@ -1209,7 +1221,7 @@ class MonitorLoop:
                 # cap, eligibility). Block this candidate for today and move on.
                 self._entry_blocked.add(snapshot.symbol)
                 summary.events.append(
-                    LoopEvent("entry_blocked", snapshot.symbol, "entry rejected by platform; skipped for today")
+                    LoopEvent("entry_blocked", snapshot.symbol, f"entry rejected by platform ({_error_summary(exc)}); skipped for today")
                 )
                 return
             raise

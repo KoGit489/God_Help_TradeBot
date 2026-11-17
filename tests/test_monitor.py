@@ -52,6 +52,28 @@ def _broker_with_position(symbol: str, quantity: int, avg: float, quote: Quote) 
     return broker
 
 
+def test_rate_limit_uses_cooldown_without_counting_toward_halt():
+    loop = MonitorLoop(PaperBroker(1_000), now_provider=_open_market_now)
+
+    class RateLimitError(RuntimeError):
+        http_status = 429
+
+    def fail(summary):
+        raise RateLimitError("TOO_MANY_REQUESTS")
+
+    loop._run_cycle = fail
+    result = loop.run_once()
+    assert loop._consecutive_errors == 0
+    assert loop._rate_limit_backoff_active is True
+    assert loop.error_backoff_seconds == 300
+    assert result.events[-1].kind == "rate_limit_backoff"
+
+    loop._run_cycle = lambda summary: setattr(summary, "polls", summary.polls + 1)
+    loop.run_once()
+    assert loop._rate_limit_backoff_active is False
+    assert loop.error_backoff_seconds == 30
+
+
 def test_monitor_exits_at_target_price() -> None:
     quote = Quote("NIVF", Decimal("0.15"), Decimal("0.16"), Decimal("0.15"))
     broker = _broker_with_position("NIVF", 100, 0.10, quote)
