@@ -19,6 +19,7 @@ from typing import Any
 from .config import BotConfig
 from .monitor import ExitPlan
 from .paper import PaperOrder, Position
+from .schedule import EASTERN, get_trading_session
 
 DEFAULT_STATE_FILE = Path("bot_state.json")
 
@@ -82,7 +83,7 @@ class EquityPerformanceStore:
         self.data = {
             "version": 1, "account_id": account_id, "trades": [], "reviews": [],
             "active": {}, "orders": {}, "fills": {}, "adaptive": {},
-            "reviewed_count": 0, "paused": False,
+            "reviewed_count": 0, "paused": False, "take_profit_sessions": {},
         }
         if self.path.exists():
             try:
@@ -96,6 +97,13 @@ class EquityPerformanceStore:
                     if not isinstance(loaded.get(key), dict):
                         raise ValueError("invalid ledger")
                 self.data.update(loaded)
+                sessions = self.data["take_profit_sessions"]
+                if not isinstance(sessions, dict) or any(
+                    datetime.fromisoformat(day).date().isoformat() != day
+                    or (result is not None and not isinstance(result, bool))
+                    for day, result in sessions.items()
+                ):
+                    raise ValueError("invalid take-profit sessions")
                 if loaded.get("version") != 1 or not isinstance(self.data["paused"], bool):
                     raise ValueError("invalid ledger version or pause flag")
                 if any(trade.get("outcome") not in ("win", "loss", "flat") for trade in loaded["trades"]):
@@ -267,6 +275,47 @@ class EquityPerformanceStore:
     def effective_config(self, config: BotConfig) -> BotConfig:
         overrides = {name: value for name, value in self.data["adaptive"].items() if name != "min_confirmation_score"}
         return replace(config, **overrides)
+
+    @property
+    def prioritize_prepop(self) -> bool:
+        sessions = [result for _, result in sorted(self.data["take_profit_sessions"].items()) if result is not None]
+        return any(
+            sum(result is True for result in sessions[start:start + 5]) < 4
+            for start in range(0, len(sessions) - 4, 5)
+        )
+
+    def review_take_profit(self, now: datetime, *, observe: bool) -> list[tuple[str, bool, int, int]]:
+        now = now.astimezone(EASTERN)
+        sessions = self.data["take_profit_sessions"]
+        today = get_trading_session(now.date())
+        if observe and today and today.market_open <= now < today.market_close and now.date().isoformat() not in sessions:
+            sessions[now.date().isoformat()] = None
+            self.save()
+        if self.data["active"] or self.data["orders"]:
+            return []
+        candidates = {day: False for day, result in sessions.items() if result is None}
+        for trade in self.data["trades"]:
+            if not trade.get("closed_at"):
+                continue
+            day = datetime.fromisoformat(trade["closed_at"]).astimezone(EASTERN).date().isoformat()
+            if sessions.get(day) is not None:
+                continue
+            entry = Decimal(trade["entry_notional"])
+            exit_value = Decimal(trade["exit_notional"])
+            hit = trade["direction"] == "long" and entry > 0 and exit_value >= entry * Decimal("1.30")
+            candidates[day] = candidates.get(day, False) or hit
+        results = []
+        for day, hit in sorted(candidates.items()):
+            session = get_trading_session(datetime.fromisoformat(day).date())
+            if session is None or now < session.market_close:
+                continue
+            sessions[day] = hit
+            closed = [result for _, result in sorted(sessions.items()) if result is not None]
+            window = closed[((len(closed) - 1) // 5) * 5:]
+            results.append((day, hit, sum(window), len(window)))
+        if results:
+            self.save()
+        return results
 
 
 __all__ = ["StateStore", "EquityPerformanceStore", "DEFAULT_STATE_FILE"]

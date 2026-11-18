@@ -121,6 +121,25 @@ sample. Tightening is a heuristic policy, not verified improvement or a guarante
 of 80% wins, profitability, or durability across future market regimes. Fees and
 borrow costs are not included in the ledger's gross P&L.
 
+### Five-session take-profit review
+
+The equity ledger also records one result per observed regular U.S. trading
+session, finalized after the close and after tracked fills reconcile. A hit is
+at least one completed long trade recorded that session with a gross realized
+return of 30% or more on entry notional. An observed no-trade session is a miss;
+unobserved sessions are not invented. Existing verified fills seed their close
+dates. A 2.52% win therefore earns a session slot, not a 30% hit. Market-wide
+gainers and unrealized price moves are not credited as bot results.
+
+`[take_profit_session]` logs each day and `[take_profit_review]` logs each
+non-overlapping five-session review. After any review below four hits, the
+ledger persistently prefers eligible pre-pop long setups over momentum longs
+when account-price priority is active, retaining price order within each
+profile. Short slots, fallback, confirmation rules, win-review gates,
+position sizing and exits are unchanged. This is a ranking heuristic, not
+evidence of an edge. News, patterns, and other confirmation inputs keep their
+existing behavior; do not retune them from five observations alone.
+
 ### Scanner recovery
 
 Equity discovery refreshes once per 60 seconds and starts at most four

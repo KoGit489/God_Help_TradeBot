@@ -1,6 +1,6 @@
 """Trade outcome logging: fill prices, P&L, and fill-anchored brackets."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -159,6 +159,55 @@ def test_five_completed_trades_below_four_wins_tighten_picking(tmp_path):
     ledger = EquityPerformanceStore(ledger.path, "test-account")
     assert len(ledger.data["trades"]) == 5
     assert ledger.data["reviewed_count"] == 5
+
+
+def test_take_profit_sessions_bootstrap_from_fills_and_keep_win_review_independent(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    config = BotConfig(account_price_priority=True)
+    monday = datetime(2026, 10, 5, 11, tzinfo=EASTERN)
+    for index, price in enumerate(("10.252", "13", "13", "12.999", "13")):
+        now = monday + timedelta(days=index)
+        for trade_number in range(2 if index == 0 else 1):
+            suffix = f"{index}-{trade_number}"
+            for side, role, fill in ((OrderSide.BUY, "ENTRY", "10"), (OrderSide.SELL, "EXIT", price)):
+                ledger.record_fill(PaperOrder(1, "MARA", side, 10, OrderType.MARKET,
+                                              status=OrderStatus.FILLED, fill_price=Decimal(fill),
+                                              client_order_id=f"{role}-{suffix}"), role, now)
+            ledger.finalize({}, now, config, 0.5)
+        assert ledger.review_take_profit(now, observe=True) == []
+        session_results = ledger.review_take_profit(now.replace(hour=16), observe=True)
+        assert len(session_results) == 1
+        assert session_results[0][1:] == (price == "13", (0, 1, 2, 2, 3)[index], index + 1)
+    ledger = EquityPerformanceStore(ledger.path, "test-account")
+    assert ledger.prioritize_prepop
+    assert ledger.review_take_profit(now, observe=True) == []
+    assert ledger.data["reviews"][0]["wins"] == 5
+    assert ledger.data["adaptive"] == {}
+    assert not ledger.data["paused"]
+    assert ledger.effective_config(config) == config
+
+
+def test_take_profit_counts_only_observed_sessions_or_verified_trade_days(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    now = _open_now()
+    ledger.data["trades"].append({
+        "closed_at": (now - timedelta(days=2)).isoformat(),
+        "entry_notional": "100", "exit_notional": "102.52", "direction": "long",
+    })
+    assert ledger.review_take_profit(now, observe=True) == [("2026-10-05", False, 0, 1)]
+    assert ledger.review_take_profit(now.replace(hour=16), observe=True) == [("2026-10-07", False, 0, 2)]
+    assert not ledger.prioritize_prepop
+
+
+def test_take_profit_prepop_preference_preserves_win_review_gates(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    config = BotConfig(account_price_priority=True)
+    loop = MonitorLoop(PaperBroker(1_000), config, performance_store=ledger)
+    candidates = [_snap("MOMENTUM", 10, 9), _snap("COIL", 3, 1)]
+    assert loop._ranked_profiles(candidates)[0].candidate.snapshot.symbol == "MOMENTUM"
+    ledger.data["take_profit_sessions"] = {f"2026-10-0{day}": False for day in range(5, 10)}
+    assert loop._ranked_profiles(candidates)[0].candidate.snapshot.symbol == "COIL"
+    assert loop.config == config
 
 
 def _open_now() -> datetime:

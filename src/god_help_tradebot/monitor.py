@@ -270,6 +270,19 @@ class MonitorLoop:
             self._maybe_enter(summary)
 
         self._persist_plans()
+        if self.performance_store is not None:
+            for day, hit, hits, count in self.performance_store.review_take_profit(
+                self._now(), observe=self.allow_entries and not self.performance_store.data["paused"],
+            ):
+                summary.events.append(LoopEvent(
+                    "take_profit_session", "account",
+                    f"{day} realized +30% long: {'hit' if hit else 'miss'}; {hits}/{count} sessions; target 4/5",
+                ))
+                if count == 5:
+                    summary.events.append(LoopEvent(
+                        "take_profit_review", "account",
+                        f"{hits}/5 sessions hit +30%; target 4/5; prepop_priority={self.performance_store.prioritize_prepop}",
+                    ))
 
     def run(self, summary: LoopSummary | None = None) -> LoopSummary:
         """Poll until max_polls is reached; sleeps poll_seconds between cycles."""
@@ -778,6 +791,12 @@ class MonitorLoop:
         combined.sort(key=lambda item: (priority.get(item.profile, 9), -item.candidate.score))
         if self.config.account_price_priority:
             combined.sort(key=lambda item: (-item.candidate.snapshot.price, -item.candidate.score, priority.get(item.profile, 9)))
+            if self.performance_store is not None and self.performance_store.prioritize_prepop:
+                long_profiles = iter(sorted(
+                    (item for item in combined if item.profile in ("momentum", "prepop")),
+                    key=lambda item: item.profile != "prepop",
+                ))
+                combined = [next(long_profiles) if item.profile in ("momentum", "prepop") else item for item in combined]
         return combined
 
     def _best_odds_fallback(
