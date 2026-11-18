@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from math import isfinite
+from typing import TypeGuard
 
 from .config import BotConfig
 
@@ -14,6 +16,20 @@ class MarketSnapshot:
     ask: float
     day_low: float
     day_high: float
+    open_price: float | None = None
+    previous_close: float | None = None
+
+    @property
+    def gap_percent(self) -> float | None:
+        if not _positive_price(self.open_price) or not _positive_price(self.previous_close):
+            return None
+        return (self.open_price / self.previous_close - 1) * 100
+
+    @property
+    def from_open_percent(self) -> float | None:
+        if not _positive_price(self.open_price) or not _positive_price(self.price):
+            return None
+        return (self.price / self.open_price - 1) * 100
 
     @property
     def relative_volume(self) -> float:
@@ -34,6 +50,10 @@ class MarketSnapshot:
 class RankedCandidate:
     snapshot: MarketSnapshot
     score: float
+
+
+def _positive_price(value: float | None) -> TypeGuard[float]:
+    return value is not None and isfinite(value) and value > 0
 
 
 @dataclass(frozen=True)
@@ -76,9 +96,20 @@ def explosive_score(snapshot: MarketSnapshot, direction: str = "long") -> float:
     volume surge carries the most weight, then price velocity, then pressure
     toward the day's extreme (high for longs, low for shorts), then liquidity
     (a tight spread means cleaner fills on a fast mover).
+    When opening prices are known, the velocity component gives more weight
+    to volume-supported, directional follow-through than to the opening gap.
     """
     volume_surge = min(snapshot.relative_volume / 15, 1.0)
     velocity = min(abs(snapshot.change_percent) / 30, 1.0)
+    gap = snapshot.gap_percent
+    from_open = snapshot.from_open_percent
+    if gap is not None and from_open is not None:
+        sign = -1 if direction == "short" else 1
+        gap_velocity = min(max(sign * gap / 30, 0), 1)
+        tape_velocity = min(max(sign * from_open / 30, -1), 1)
+        if tape_velocity > 0:
+            tape_velocity *= 0.5 + 0.5 * volume_surge
+        velocity = max(0, 0.25 * gap_velocity + 0.75 * tape_velocity)
     if direction == "short":
         pressure = 1.0 - snapshot.range_position
     else:

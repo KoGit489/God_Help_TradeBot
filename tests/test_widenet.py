@@ -1,6 +1,6 @@
 """Wide-net mode: bigger lists, daily news cache, per-cycle confirmation budget."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -139,7 +139,8 @@ def test_news_is_cached_per_symbol_per_day(monkeypatch) -> None:
             pass
 
         def json(self):
-            return {"feed": [{"ticker_sentiment": [{"ticker": "XYZ", "ticker_sentiment_score": "0.2"}]}]}
+            return {"feed": [{"time_published": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S"),
+                              "ticker_sentiment": [{"ticker": "XYZ", "ticker_sentiment_score": "0.2"}]}]}
 
     def _fake_get(*args, **kwargs):
         calls.append(1)

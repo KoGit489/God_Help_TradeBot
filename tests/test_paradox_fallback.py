@@ -3,6 +3,8 @@
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from god_help_tradebot import BotConfig, MonitorLoop, PaperBroker
 from god_help_tradebot.broker import WebullSandboxBroker
 from god_help_tradebot.paper import OrderSide, Quote
@@ -68,22 +70,29 @@ def test_price_priority_selects_highest_affordable_qualified_stock(monkeypatch):
     assert loop._select_candidate(snapshots, LoopSummary()) is None
 
 
-def test_price_priority_fallback_uses_highest_price_then_weakest_score(monkeypatch):
+@pytest.mark.parametrize("bearish", [False, True])
+@pytest.mark.parametrize("paradox, blocked, expected", [
+    (True, False, "LOW"), (True, True, "HIGH_WEAK"), (False, False, "HIGH"),
+])
+def test_price_priority_fallback_ranks_eligible_reads(monkeypatch, bearish, paradox, blocked, expected):
     import god_help_tradebot.monitor as monitor
     from god_help_tradebot.screen import RankedCandidate
 
     broker = PaperBroker(1_000)
-    loop = MonitorLoop(broker, BotConfig(account_price_priority=True), now_provider=_open_now)
+    config = BotConfig(account_price_priority=True, allow_shorts=True, paradox_fallback=paradox)
+    loop = MonitorLoop(broker, config, now_provider=_open_now)
     lower = _snapshot("LOW", 4, 6, 1.5, 3.9, 4.3)
     higher = _snapshot("HIGH", 300, 6, 1.5, 290, 310)
     weakest = _snapshot("HIGH_WEAK", 300, 6, 1.5, 290, 310)
-    monkeypatch.setattr(monitor, "screen_candidates", lambda *args: [
-        RankedCandidate(lower, 0.01), RankedCandidate(higher, 0.9), RankedCandidate(weakest, 0.2),
-    ])
-    loop.allow_shorts = True
-    monkeypatch.setattr(monitor, "screen_loser_candidates", lambda *args: [])
+    tied = _snapshot("TIED", 200, 6, 1.5, 190, 210)
+    reads = [RankedCandidate(higher, 0.9), RankedCandidate(tied, 0.2),
+             RankedCandidate(weakest, 0.2), RankedCandidate(lower, 0.01)]
+    monkeypatch.setattr(monitor, "screen_candidates", lambda *args: [] if bearish else reads)
+    monkeypatch.setattr(monitor, "screen_loser_candidates", lambda *args: reads if bearish else [])
+    monkeypatch.setattr(loop, "_paradox_tape_ok", lambda symbol, direction, summary: not (blocked and symbol == "LOW"))
     selected = loop._best_odds_fallback([], monitor.LoopSummary())
-    assert selected[0].candidate.snapshot.symbol == "HIGH_WEAK"
+    assert selected[0].candidate.snapshot.symbol == expected
+    assert selected[0].profile == ("fallback_loser" if bearish else "fallback")
 
 
 def test_price_priority_keeps_inverse_fallback_and_refreshes_entry_funds():

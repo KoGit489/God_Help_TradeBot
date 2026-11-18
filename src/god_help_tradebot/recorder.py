@@ -57,6 +57,8 @@ class SessionRecorder:
             "ask": snapshot.ask,
             "day_low": snapshot.day_low,
             "day_high": snapshot.day_high,
+            "open_price": snapshot.open_price,
+            "previous_close": snapshot.previous_close,
         }
 
     @staticmethod

@@ -120,12 +120,15 @@ def test_fetch_top_gainers_returns_rows_from_broker() -> None:
 def test_enrich_with_quotes_replaces_placeholder_bid_ask() -> None:
     quote = Quote("GOW", Decimal("3.10"), Decimal("3.12"), Decimal("3.11"))
     broker = _broker([], {"GOW": quote})
-    snapshot = screener_row_to_snapshot(_row("GOW", 3.18, 1.98, 500_000, 2.5, 2.80, 3.40))
+    row = _row("GOW", 3.18, 1.98, 500_000, 2.5, 2.80, 3.40)
+    snapshot = screener_row_to_snapshot({**row, "open": "3.05", "pre_close": "2.90"})
 
     enriched = enrich_with_quotes(broker, [snapshot])
 
     assert enriched[0].bid == 3.10
     assert enriched[0].ask == 3.12
+    assert enriched[0].open_price == 3.05
+    assert enriched[0].previous_close == 2.90
 
 
 def test_enrich_with_quotes_drops_symbols_without_quotes() -> None:

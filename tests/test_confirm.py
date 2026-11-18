@@ -213,8 +213,11 @@ def _news_payload(items):
 
 
 def _news_item(ticker: str, score: float, relevance: float = 1.0):
+    from datetime import datetime, timezone
+
     return {
         "title": "headline",
+        "time_published": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S"),
         "ticker_sentiment": [
             {
                 "ticker": ticker,
@@ -264,6 +267,23 @@ def test_news_sentiment_ignores_other_tickers(monkeypatch) -> None:
     report = fetch_news_sentiment("GOW")
 
     assert report.article_count == 1
+
+
+def test_news_sentiment_uses_only_recent_available_headlines(monkeypatch) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    fresh = _news_item("FRESH", 0.4)
+    stale = {**_news_item("FRESH", -0.9), "time_published": (now - timedelta(days=4)).strftime("%Y%m%dT%H%M%S")}
+    future = {**stale, "time_published": (now + timedelta(hours=1)).strftime("%Y%m%dT%H%M%S")}
+    undated = {**stale, "time_published": None}
+    items = [fresh, stale, future, undated, _news_item("BEAR", -0.4), _news_item("NEUTRAL", 0.0)]
+    monkeypatch.setattr("god_help_tradebot.news.requests.get", lambda *a, **k: _FakeNewsResponse(_news_payload(items)))
+    bullish, bearish, neutral = (fetch_news_sentiment(symbol) for symbol in ("FRESH", "BEAR", "NEUTRAL"))
+    assert bullish.article_count == bearish.article_count == 1
+    assert bullish.score > 0.5
+    assert bullish.score == round(1 - bearish.score, 4)
+    assert neutral.score == 0.5
 
 
 def test_news_sentiment_network_failure_is_neutral(monkeypatch) -> None:

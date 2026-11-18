@@ -125,8 +125,10 @@ borrow costs are not included in the ledger's gross P&L.
 
 The equity ledger also records one result per observed regular U.S. trading
 session, finalized after the close and after tracked fills reconcile. A hit is
-at least one completed long trade recorded that session with a gross realized
-return of 30% or more on entry notional. An observed no-trade session is a miss;
+at least one completed long or short trade recorded that session with a gross
+realized return of 30% or more on entry notional. A short's profit is its entry
+proceeds minus the cost to cover. Prior long-only misses are corrected when
+the ledger has qualifying short fills. An observed no-trade session is a miss;
 unobserved sessions are not invented. Existing verified fills seed their close
 dates. A 2.52% win therefore earns a session slot, not a 30% hit. Market-wide
 gainers and unrealized price moves are not credited as bot results.
@@ -137,8 +139,24 @@ ledger persistently prefers eligible pre-pop long setups over momentum longs
 when account-price priority is active, retaining price order within each
 profile. Short slots, fallback, confirmation rules, win-review gates,
 position sizing and exits are unchanged. This is a ranking heuristic, not
-evidence of an edge. News, patterns, and other confirmation inputs keep their
-existing behavior; do not retune them from five observations alone.
+evidence of an edge. Do not retune the strategy from five observations alone.
+
+Ticker news confirmation uses timestamped coverage available in the prior 72
+hours at fetch time. Sparse coverage pulls both bullish and bearish sentiment
+toward neutral. The daily cache remains in place to limit requests, so it is
+not a real-time catalyst feed. A move from the prior close may already have
+happened before the open; neither the headline nor the gap certifies a
+tradable 30% move after entry, especially around halts and fixed-price deals.
+
+When Webull ranking rows include `open` and `pre_close`, the explosive-move
+score separates the opening gap from the move since the open. Directional
+follow-through gets more weight, strong relative volume supports it, and a
+move against the proposed direction can offset gap credit. Both longs and
+shorts use this calculation without extra API calls. Missing opening fields
+retain the original score. The result affects momentum and bearish profile
+scores, not price priority, entry gates or risk limits. New recordings retain
+the inputs for replay; older files still load but lack the signal. Measure
+outcomes on later sessions before relying on this heuristic.
 
 ### Scanner recovery
 
@@ -172,9 +190,11 @@ leave funds unused or cause rejection. Margin buying power may include leverage;
 it is not the cash balance or equity. Full-budget sizing is highly concentrated.
 
 Fallback retains its existing relaxed filters and first-hour/tape protections.
-In this mode, highest affordable price takes priority, with weakest screen score
-breaking same-price ties when `paradox_fallback` is enabled. Bullish fallback
-reads are shorted; bearish fallback reads are bought. Weakest score is a heuristic,
+With `paradox_fallback` enabled, the weakest eligible screen score takes
+priority across bullish and bearish reads, with higher price breaking equal
+scores in account-price-priority mode. Bullish fallback reads are shorted;
+bearish fallback reads are bought. Without Paradox, account-price-priority
+fallback still ranks highest affordable price first. Weakest score is a heuristic,
 not a measured probability of loss. Buying-power eligibility is not proof that
 a particular stock is borrowable or its short margin requirement is satisfied.
 

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from math import isfinite
 from typing import Any, Iterable
 
 from .broker import WebullSandboxBroker, US_STOCK_CATEGORY, is_rate_limit_error, webull_error_code
@@ -55,6 +56,8 @@ def screener_row_to_snapshot(row: dict[str, Any]) -> MarketSnapshot | None:
     volume = int(_decimal_or_zero(row.get("volume")))
     rel_volume = _decimal_or_zero(row.get("relative_volume_10d"))
     average_volume = int(volume / rel_volume) if rel_volume > 0 else volume or 1
+    open_price = _decimal_or_zero(row.get("open"))
+    previous_close = _decimal_or_zero(row.get("pre_close"))
 
     return MarketSnapshot(
         symbol=symbol,
@@ -66,6 +69,8 @@ def screener_row_to_snapshot(row: dict[str, Any]) -> MarketSnapshot | None:
         ask=price,
         day_low=_decimal_or_zero(row.get("low")) or price,
         day_high=_decimal_or_zero(row.get("high")) or price,
+        open_price=open_price if isfinite(open_price) and open_price > 0 else None,
+        previous_close=previous_close if isfinite(previous_close) and previous_close > 0 else None,
     )
 
 
@@ -178,19 +183,7 @@ def enrich_with_quotes(
         quote = quotes.get(snapshot.symbol)
         if quote is None or quote.bid <= 0 or quote.ask <= 0:
             continue
-        enriched.append(
-            MarketSnapshot(
-                symbol=snapshot.symbol,
-                price=snapshot.price,
-                change_percent=snapshot.change_percent,
-                volume=snapshot.volume,
-                average_volume=snapshot.average_volume,
-                bid=float(quote.bid),
-                ask=float(quote.ask),
-                day_low=snapshot.day_low,
-                day_high=snapshot.day_high,
-            )
-        )
+        enriched.append(replace(snapshot, bid=float(quote.bid), ask=float(quote.ask)))
     return enriched
 
 

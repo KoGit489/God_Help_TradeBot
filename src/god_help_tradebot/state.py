@@ -298,11 +298,16 @@ class EquityPerformanceStore:
             if not trade.get("closed_at"):
                 continue
             day = datetime.fromisoformat(trade["closed_at"]).astimezone(EASTERN).date().isoformat()
-            if sessions.get(day) is not None:
+            if sessions.get(day) is True:
                 continue
             entry = Decimal(trade["entry_notional"])
             exit_value = Decimal(trade["exit_notional"])
-            hit = trade["direction"] == "long" and entry > 0 and exit_value >= entry * Decimal("1.30")
+            profit = entry - exit_value if trade["direction"] == "short" else exit_value - entry
+            hit = entry > 0 and profit >= entry * Decimal("0.30")
+            if sessions.get(day) is False:
+                if hit:
+                    candidates[day] = True
+                continue
             candidates[day] = candidates.get(day, False) or hit
         results = []
         for day, hit in sorted(candidates.items()):
@@ -310,7 +315,7 @@ class EquityPerformanceStore:
             if session is None or now < session.market_close:
                 continue
             sessions[day] = hit
-            closed = [result for _, result in sorted(sessions.items()) if result is not None]
+            closed = [result for date, result in sorted(sessions.items()) if date <= day and result is not None]
             window = closed[((len(closed) - 1) // 5) * 5:]
             results.append((day, hit, sum(window), len(window)))
         if results:

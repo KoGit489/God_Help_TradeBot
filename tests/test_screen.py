@@ -1,3 +1,7 @@
+from dataclasses import replace
+
+import pytest
+
 from god_help_tradebot import BotConfig, MarketSnapshot, screen_candidates
 from god_help_tradebot.screen import (
     explosive_score,
@@ -40,6 +44,19 @@ def test_screen_rejects_overextended_move() -> None:
     ranked = screen_candidates([snapshot("EXTENDED", 41, 10, 0.2)], BotConfig())
 
     assert ranked == []
+
+
+@pytest.mark.parametrize("direction, prior, continuing_open, reversing_open", [
+    ("long", 1.8, 1.81, 2.10), ("short", 2.2, 2.19, 1.9),
+])
+def test_explosive_score_favors_follow_through_over_a_gap_reversal(direction, prior, continuing_open, reversing_open):
+    base = snapshot("TEST", 10, 8, 0.2)
+    continuation = replace(base, open_price=continuing_open, previous_close=prior)
+    gap_only = replace(continuation, open_price=base.price)
+    reversal = replace(continuation, open_price=reversing_open)
+    assert explosive_score(continuation, direction) > explosive_score(gap_only, direction)
+    assert explosive_score(gap_only, direction) > explosive_score(reversal, direction)
+    assert explosive_score(replace(continuation, previous_close=float("nan")), direction) == explosive_score(base, direction)
 
 
 def test_snapshot_metrics_are_transparent() -> None:

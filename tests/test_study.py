@@ -20,9 +20,14 @@ def _quote(symbol: str, price: float) -> Quote:
 # --- Recorder --------------------------------------------------------------------
 
 def test_recorder_writes_and_loads_a_day(tmp_path) -> None:
+    from dataclasses import replace
+
+    from god_help_tradebot.backtest import _snapshot_from
+
     recorder = SessionRecorder(tmp_path)
     when = datetime(2026, 10, 7, 10, 0, tzinfo=EASTERN)
-    recorder.record_step(when, [_snap("GOW", 3.0)], [_quote("GOW", 3.0)])
+    snapshot = replace(_snap("GOW", 3.0), open_price=2.8, previous_close=2.7)
+    recorder.record_step(when, [snapshot], [_quote("GOW", 3.0)])
 
     days = list_recorded_days(tmp_path)
     assert len(days) == 1
@@ -30,6 +35,7 @@ def test_recorder_writes_and_loads_a_day(tmp_path) -> None:
     steps = load_recorded_day(days[0])
     assert steps[0]["snapshots"][0]["symbol"] == "GOW"
     assert steps[0]["quotes"][0]["bid"] == 2.99
+    assert _snapshot_from(steps[0]["snapshots"][0]) == snapshot
 
 
 def test_recorder_appends_multiple_steps(tmp_path) -> None:

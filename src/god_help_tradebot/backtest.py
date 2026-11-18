@@ -65,6 +65,8 @@ def _snapshot_from(data: dict[str, Any]) -> MarketSnapshot:
         ask=float(data["ask"]),
         day_low=float(data["day_low"]),
         day_high=float(data["day_high"]),
+        open_price=float(data["open_price"]) if data.get("open_price") is not None else None,
+        previous_close=float(data["previous_close"]) if data.get("previous_close") is not None else None,
     )
 
 

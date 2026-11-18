@@ -11,7 +11,8 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ DEFAULT_TIMEOUT = 10
 # short TTL so a transient blip doesn't freeze a symbol's news all day.
 _NEWS_CACHE: dict[str, tuple[float, "NewsReport"]] = {}
 _EMPTY_REPORT_TTL_SECONDS = 600
+_NEWS_LOOKBACK = timedelta(hours=72)
+_NEWS_TIME_FORMAT = "%Y%m%dT%H%M%S"
 
 
 @dataclass(frozen=True)
@@ -82,7 +85,9 @@ def fetch_news_sentiment(
     symbol = symbol.upper()
     key = api_key or _env_api_key() or "demo"
 
-    cache_key = f"{symbol}:{datetime.now(timezone.utc).date().isoformat()}"
+    requested_at = datetime.now(timezone.utc)
+    earliest = requested_at - _NEWS_LOOKBACK
+    cache_key = f"{symbol}:{requested_at.date().isoformat()}"
     now = time.time()
     cached = _NEWS_CACHE.get(cache_key)
     if cached is not None:
@@ -98,6 +103,7 @@ def fetch_news_sentiment(
                 "tickers": symbol,
                 "apikey": key,
                 "limit": "50",
+                "time_from": earliest.strftime("%Y%m%dT%H%M"),
             },
             timeout=timeout,
         )
@@ -108,7 +114,7 @@ def fetch_news_sentiment(
         _NEWS_CACHE[cache_key] = (now, report)
         return report
 
-    feed = payload.get("feed")
+    feed = payload.get("feed") if isinstance(payload, dict) else None
     if not isinstance(feed, list):
         report = NewsReport(symbol, 0.5, 0, None, 0, 0, 0)
         _NEWS_CACHE[cache_key] = (now, report)
@@ -119,13 +125,19 @@ def fetch_news_sentiment(
     for item in feed:
         if not isinstance(item, dict):
             continue
+        try:
+            published = datetime.strptime(item.get("time_published"), _NEWS_TIME_FORMAT).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if not earliest <= published <= requested_at:
+            continue
         for entry in item.get("ticker_sentiment", []) or []:
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("ticker", "")).upper() != symbol:
                 continue
             score = _float(entry.get("ticker_sentiment_score"))
-            if score is None:
+            if score is None or not isfinite(score) or not -1 <= score <= 1:
                 continue
             scores.append(score)
             label = _label(score)
@@ -143,12 +155,8 @@ def fetch_news_sentiment(
         return report
 
     average = sum(scores) / count
-    # Map sentiment from [-1, 1] to [0, 1].
-    sentiment_component = (average + 1.0) / 2.0
-    # Coverage breadth rewards more reporting, saturating around 10 articles.
     coverage_component = min(count / 10.0, 1.0)
-    # Blend: sentiment matters most, but more coverage strengthens the signal.
-    score = round((sentiment_component * 0.7) + (coverage_component * 0.3 * sentiment_component), 4)
+    score = round(0.5 + (average / 2.0) * (0.7 + 0.3 * coverage_component), 4)
 
     report = NewsReport(
         symbol=symbol,

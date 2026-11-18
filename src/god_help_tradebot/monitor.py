@@ -276,7 +276,7 @@ class MonitorLoop:
             ):
                 summary.events.append(LoopEvent(
                     "take_profit_session", "account",
-                    f"{day} realized +30% long: {'hit' if hit else 'miss'}; {hits}/{count} sessions; target 4/5",
+                    f"{day} realized +30% (long or short): {'hit' if hit else 'miss'}; {hits}/{count} sessions; target 4/5",
                 ))
                 if count == 5:
                     summary.events.append(LoopEvent(
@@ -838,7 +838,10 @@ class MonitorLoop:
             ]
             if not candidates:
                 return None
-            candidates.sort(key=lambda item: (-item[0].snapshot.price, item[0].score if weakest else -item[0].score))
+            if weakest:
+                candidates.sort(key=lambda item: (item[0].score, -item[0].snapshot.price))
+            else:
+                candidates.sort(key=lambda item: (-item[0].snapshot.price, -item[0].score))
             selected = None
             for candidate, profile in candidates:
                 short = (profile == "fallback" if weakest else profile == "fallback_loser")
@@ -857,8 +860,13 @@ class MonitorLoop:
             if selected is None:
                 return None
             chosen, profile = selected
+            read = "bullish" if profile == "fallback" else "bearish"
+            reason = (
+                f"weakest eligible {read} read (score {chosen.score}); inverse execution"
+                if weakest else "highest-priced affordable fallback"
+            )
             summary.events.append(LoopEvent("fallback_entry_candidate", chosen.snapshot.symbol,
-                                            "highest-priced affordable fallback; inverse execution when enabled"))
+                                            reason))
             return ProfiledCandidate(chosen, profile), True
         best_bull = (bulls[-1] if weakest else bulls[0]) if bulls else None
         best_bear = (bears[-1] if weakest else bears[0]) if bears else None

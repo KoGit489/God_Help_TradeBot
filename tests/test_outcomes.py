@@ -199,6 +199,27 @@ def test_take_profit_counts_only_observed_sessions_or_verified_trade_days(tmp_pa
     assert not ledger.prioritize_prepop
 
 
+@pytest.mark.parametrize("cover_price, hit", [("7", True), ("7.001", False), ("13", False)])
+@pytest.mark.parametrize("previous_miss", [False, True])
+def test_take_profit_scores_short_sessions_from_realized_fills(tmp_path, cover_price, hit, previous_miss):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    now = _open_now()
+    day = now.date().isoformat()
+    if previous_miss:
+        ledger.data["take_profit_sessions"][day] = False
+    for side, role, price in ((OrderSide.SHORT, "ENTRY", "10"), (OrderSide.BUY, "EXIT", cover_price)):
+        order = PaperOrder(1, "TEST", side, 10, OrderType.MARKET, status=OrderStatus.FILLED,
+                           fill_price=Decimal(price), client_order_id=role)
+        ledger.record_fill(order, role, now)
+    ledger.finalize({}, now, BotConfig(), 0.5)
+    closed = now.replace(hour=16)
+    expected = [(day, hit, int(hit), 1)] if hit or not previous_miss else []
+    assert ledger.review_take_profit(closed, observe=True) == expected
+    ledger = EquityPerformanceStore(ledger.path, "test-account")
+    assert ledger.data["take_profit_sessions"] == {day: hit}
+    assert ledger.review_take_profit(closed, observe=True) == []
+
+
 def test_take_profit_prepop_preference_preserves_win_review_gates(tmp_path):
     ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
     config = BotConfig(account_price_priority=True)
