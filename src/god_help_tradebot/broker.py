@@ -614,7 +614,7 @@ class WebullSandboxBroker:
                 record = self.get_order_status(order.client_order_id)
                 if record is not None:
                     self.apply_order_status(order, record)
-            if order.status is OrderStatus.FILLED and order.filled_quantity and order.fill_price is None:
+            if order.status in (OrderStatus.FILLED, OrderStatus.CANCELED) and order.filled_quantity and order.fill_price is None:
                 missing_price.append(order)
         if missing_price:
             self._recover_filled_prices_from_history(missing_price)
@@ -651,7 +651,9 @@ class WebullSandboxBroker:
         collect(history)
         for order in orders:
             for record in matching.get(order.client_order_id, []):
-                if str(record.get("status", "")).upper() not in ("FILLED", "PARTIAL_FILLED"):
+                if str(record.get("status", "")).upper() not in (
+                    "FILLED", "PARTIAL_FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED",
+                ):
                     continue
                 symbol = record.get("symbol")
                 if symbol and str(symbol).upper() != order.symbol.upper():

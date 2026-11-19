@@ -122,6 +122,40 @@ def test_order_history_fill_requires_matching_completed_quantity():
     assert order.filled_quantity == 100
 
 
+def test_order_history_recovers_partial_fill_for_canceled_order():
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    order = PaperOrder(1, "MARA", OrderSide.BUY, 100, OrderType.MARKET,
+                       client_order_id="partial-id")
+    trade_api = SimpleNamespace(
+        get_order_detail=lambda account, client_id: Response({"orders": [{
+            "client_order_id": client_id, "status": "CANCELED", "filled_quantity": "40",
+        }]}),
+        get_order_history=lambda account, **kwargs: Response({"orders": [{
+            "client_order_id": "partial-id", "symbol": "MARA", "side": "BUY",
+            "status": "CANCELED", "filled_quantity": "40", "filled_price": "6.50",
+        }]}),
+    )
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.session = SimpleNamespace(account_id="test-account", trade_client=SimpleNamespace(order_v3=trade_api))
+    broker._resolved_account_id = "test-account"
+    broker._orders = {1: order}
+    broker._last_order_history_lookup_at = 0.0
+
+    broker.sync_orders()
+
+    assert order.status is OrderStatus.CANCELED
+    assert order.filled_quantity == 40
+    assert order.fill_price == Decimal("6.50")
+
+
 def test_verified_flat_fill_recovery_clears_only_missing_price_pause(tmp_path):
     ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
     ledger.data["paused"] = True
