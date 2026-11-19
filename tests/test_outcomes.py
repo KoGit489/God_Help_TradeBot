@@ -47,6 +47,161 @@ def test_unpriced_fill_and_account_mismatch_require_reconciliation(tmp_path):
         EquityPerformanceStore(ledger.path, "different-account")
 
 
+def test_order_sync_uses_exact_filled_history_row_when_detail_has_no_price():
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    order = PaperOrder(1, "MARA", OrderSide.SHORT, 148_484, OrderType.MARKET,
+                       client_order_id="entry-id")
+    calls = []
+    trade_orders = SimpleNamespace(
+        get_order_detail=lambda account, client_id: Response({"orders": [{
+            "client_order_id": client_id, "status": "FILLED", "filled_quantity": "148484",
+        }]}),
+        get_order_history=lambda account, **kwargs: (
+            calls.append((account, kwargs)) or Response({"orders": [
+                {"client_order_id": "other-id", "symbol": "MARA", "status": "FILLED",
+                 "filled_quantity": "148484", "filled_price": "1.00"},
+                {"client_order_id": "entry-id", "symbol": "MARA", "side": "SHORT",
+                 "status": "FILLED", "filled_quantity": "148484", "filled_price": "6.60"},
+            ]})
+        ),
+    )
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.session = SimpleNamespace(account_id="test-account", trade_client=SimpleNamespace(order_v3=trade_orders))
+    broker._resolved_account_id = "test-account"
+    broker._orders = {1: order}
+    broker._last_order_history_lookup = 0.0
+
+    broker.sync_orders()
+
+    assert order.status is OrderStatus.FILLED
+    assert order.filled_quantity == 148_484
+    assert order.fill_price == Decimal("6.60")
+    assert len(calls) == 1
+    assert calls[0][0] == "test-account"
+
+
+def test_order_history_fill_requires_matching_completed_quantity():
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    order = PaperOrder(1, "MARA", OrderSide.SHORT, 100, OrderType.MARKET,
+                       client_order_id="entry-id")
+    trade_orders = SimpleNamespace(
+        get_order_detail=lambda account, client_id: Response({"orders": [{
+            "client_order_id": client_id, "status": "FILLED", "filled_quantity": "100",
+        }]}),
+        get_order_history=lambda account, **kwargs: Response({"orders": [{
+            "client_order_id": "entry-id", "symbol": "MARA", "side": "SHORT", "status": "FILLED",
+            "filled_quantity": "99", "filled_price": "6.60",
+        }]}),
+    )
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.session = SimpleNamespace(account_id="test-account", trade_client=SimpleNamespace(order_v3=trade_orders))
+    broker._resolved_account_id = "test-account"
+    broker._orders = {1: order}
+    broker._last_order_history_lookup = 0.0
+
+    broker.sync_orders()
+
+    assert order.status is OrderStatus.FILLED
+    assert order.fill_price is None
+    assert order.filled_quantity == 100
+
+
+def test_verified_flat_fill_recovery_clears_only_missing_price_pause(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    ledger.data["paused"] = True
+    ledger.data["pause_reason"] = "Filled quantity has no execution price; reconcile performance ledger"
+    entry = PaperOrder(1, "MARA", OrderSide.SHORT, 148_484, OrderType.MARKET,
+                       status=OrderStatus.FILLED, filled_quantity=148_484,
+                       fill_price=Decimal("6.60"), client_order_id="entry-id")
+    exit_order = PaperOrder(2, "MARA", OrderSide.BUY, 148_484, OrderType.MARKET,
+                            status=OrderStatus.FILLED, filled_quantity=148_484,
+                            fill_price=Decimal("6.43"), client_order_id="exit-id")
+    ledger.track_order(entry, "ENTRY")
+    ledger.track_order(exit_order, "EXIT")
+    ledger.record_fill(entry, "ENTRY", _open_now())
+    ledger.record_fill(exit_order, "EXIT", _open_now())
+
+    completed, _ = ledger.finalize({}, _open_now(), BotConfig(), 0.5)
+
+    assert len(completed) == 1
+    assert completed[0]["direction"] == "short"
+    assert completed[0]["realized_pnl_usd"] == "25242.28"
+    assert ledger.data["paused"] is False
+    assert ledger.recovery_ids == frozenset()
+
+
+def test_monitor_recovers_filled_short_from_us_order_history(tmp_path):
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    ledger.data["paused"] = True
+    ledger.data["pause_reason"] = "Filled quantity has no execution price; reconcile performance ledger"
+    entry = PaperOrder(1, "MARA", OrderSide.SHORT, 148_484, OrderType.MARKET,
+                       status=OrderStatus.FILLED, client_order_id="entry-id")
+    exit_order = PaperOrder(2, "MARA", OrderSide.BUY, 148_484, OrderType.MARKET,
+                            status=OrderStatus.FILLED, client_order_id="exit-id")
+    ledger.track_order(entry, "ENTRY")
+    ledger.track_order(exit_order, "EXIT")
+    history = {"orders": [
+        {"client_order_id": "entry-id", "symbol": "MARA", "side": "SHORT", "status": "FILLED",
+         "filled_quantity": "148484", "filled_price": "6.60"},
+        {"client_order_id": "exit-id", "symbol": "MARA", "side": "BUY", "status": "FILLED",
+         "filled_quantity": "148484", "filled_price": "6.43"},
+    ]}
+    trade_api = SimpleNamespace(
+        get_order_detail=lambda account, client_id: Response({"orders": [{
+            "client_order_id": client_id, "status": "FILLED", "filled_quantity": "148484",
+        }]}),
+        get_order_history=lambda account, **kwargs: Response(history),
+    )
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.session = SimpleNamespace(account_id="test-account", trade_client=SimpleNamespace(order_v3=trade_api))
+    broker._resolved_account_id = "test-account"
+    broker._orders = {}
+    broker._next_order_id = 1
+    broker._last_order_history_lookup_at = 0.0
+    broker.get_positions = lambda: {}
+
+    loop = MonitorLoop(broker, BotConfig(allow_shorts=True), performance_store=ledger,
+                       now_provider=_open_now, flatten_before_close=False)
+    summary = loop.run_once()
+
+    assert not any(event.kind == "error" for event in summary.events)
+    assert len(ledger.data["trades"]) == 1
+    trade = ledger.data["trades"][0]
+    assert trade["symbol"] == "MARA"
+    assert trade["direction"] == "short"
+    assert trade["entry_average_price"] == "6.60"
+    assert trade["exit_average_price"] == "6.43"
+    assert trade["realized_pnl_usd"] == "25242.28"
+    assert trade["outcome"] == "win"
+    assert ledger.data["paused"] is False
+    assert ledger.data["orders"] == {}
+
+
 def test_larger_partial_fill_without_average_does_not_reuse_old_price(tmp_path):
     broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
     order = PaperOrder(1, "TEST", OrderSide.BUY, 100, OrderType.MARKET, client_order_id="entry")

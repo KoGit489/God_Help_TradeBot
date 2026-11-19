@@ -105,6 +105,13 @@ Unrelated remote orders still block startup; an account mismatch or corrupt ledg
 requires manual reconciliation. A crash before an acknowledged order ID is saved
 can still require manual order reconciliation; do not bypass that interlock.
 
+If a completed order-detail response lacks a price, the broker checks the
+U.S.-supported order-history endpoint at most once every five minutes. It only
+accepts a positive `filled_price` from an exact client-order-ID, symbol, side,
+and filled-quantity match. New entries remain paused until tracked fills are
+recorded, trades finalize, and the account is flat with no tracked orders.
+Unmatched or unavailable history never clears the pause.
+
 Below 4/5, the policy tightens relative-volume quorum, available signal count,
 entry spread, and confirmation-score gates with bounded steps. The changes take
 effect in the running loop and persist across restarts; fallback volume gates

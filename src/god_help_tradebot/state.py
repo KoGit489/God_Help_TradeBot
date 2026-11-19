@@ -242,6 +242,15 @@ class EquityPerformanceStore:
             self.data["trades"].append(record)
             completed.append(record)
             del self.data["active"][symbol]
+        recovered_fill_pause = (
+            self.data.get("pause_reason") == "Filled quantity has no execution price; reconcile performance ledger"
+            and not self.data["active"]
+            and not self.data["orders"]
+            and not any(position.quantity for position in positions.values())
+        )
+        if recovered_fill_pause:
+            self.data["paused"] = False
+            self.data.pop("pause_reason", None)
         reviews = []
         while len(self.data["trades"]) - self.data["reviewed_count"] >= 5:
             start = self.data["reviewed_count"]
@@ -268,7 +277,7 @@ class EquityPerformanceStore:
             self.data["reviews"].append(review)
             self.data["reviewed_count"] += 5
             reviews.append(review)
-        if completed or reviews or self.data["paused"]:
+        if completed or reviews or self.data["paused"] or recovered_fill_pause:
             self.save()
         return completed, reviews
 

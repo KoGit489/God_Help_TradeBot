@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from time import monotonic
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
@@ -175,6 +177,7 @@ class WebullSandboxBroker:
         self._quote_cache: dict[str, Quote] = {}
         self._invalid_quote_symbols: set[str] = set()
         self._resolved_account_id: str | None = None
+        self._last_order_history_lookup_at = 0.0
         self._orders: dict[int, PaperOrder] = {}
         self._next_order_id = 1
 
@@ -602,14 +605,67 @@ class WebullSandboxBroker:
         return orders[0] if orders else None
 
     def sync_orders(self) -> None:
-        """Refresh locally tracked open orders with their real sandbox status and fills."""
+        """Refresh orders and recover missing completed fill prices from history."""
+        missing_price: list[PaperOrder] = []
         for order in list(self._orders.values()):
-            if order.status is not OrderStatus.OPEN or not order.client_order_id:
+            if not order.client_order_id:
                 continue
-            record = self.get_order_status(order.client_order_id)
-            if record is None:
-                continue
-            self.apply_order_status(order, record)
+            if order.status is OrderStatus.OPEN:
+                record = self.get_order_status(order.client_order_id)
+                if record is not None:
+                    self.apply_order_status(order, record)
+            if order.status is OrderStatus.FILLED and order.filled_quantity and order.fill_price is None:
+                missing_price.append(order)
+        if missing_price:
+            self._recover_filled_prices_from_history(missing_price)
+
+    def _recover_filled_prices_from_history(self, orders: list[PaperOrder]) -> None:
+        now = monotonic()
+        if now - getattr(self, "_last_order_history_lookup_at", 0.0) < 300:
+            return
+        self._last_order_history_lookup_at = now
+        today = date.today()
+        response = self.session.trade_client.order_v3.get_order_history(
+            self._resolve_account_id(),
+            page_size=100,
+            start_date=(today - timedelta(days=30)).isoformat(),
+            end_date=today.isoformat(),
+        )
+        if getattr(response, "status_code", 200) != 200:
+            return
+        history = response.json()
+        requested_ids = {order.client_order_id for order in orders}
+        matching: dict[str, list[dict[str, Any]]] = {}
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                client_id = value.get("client_order_id")
+                if client_id in requested_ids:
+                    matching.setdefault(client_id, []).append(value)
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+
+        collect(history)
+        for order in orders:
+            for record in matching.get(order.client_order_id, []):
+                if str(record.get("status", "")).upper() not in ("FILLED", "PARTIAL_FILLED"):
+                    continue
+                symbol = record.get("symbol")
+                if symbol and str(symbol).upper() != order.symbol.upper():
+                    continue
+                side = record.get("side")
+                if side and str(side).upper() != order.side.value.upper():
+                    continue
+                filled = _decimal_field(record, "filled_quantity", "filled_qty", default=Decimal("-1"))
+                if not filled.is_finite() or filled != order.filled_quantity:
+                    continue
+                price = _decimal_field(record, "filled_price", "filled_avg_price", "avg_price", default=Decimal("0"))
+                if price.is_finite() and price > 0:
+                    order.fill_price = price
+                    break
 
     def apply_order_status(self, order: PaperOrder, record: dict[str, Any]) -> None:
         mapped = WEBULL_STATUS_MAP.get(str(record.get("status", "")).upper())
@@ -617,7 +673,7 @@ class WebullSandboxBroker:
                                 default=Decimal(order.quantity if mapped is OrderStatus.FILLED else order.filled_quantity))
         if not filled.is_finite() or filled != int(filled) or not order.filled_quantity <= filled <= order.quantity:
             raise RuntimeError("Invalid broker filled quantity; order reconciliation required")
-        average = record.get("filled_avg_price") or record.get("avg_price")
+        average = record.get("filled_avg_price") or record.get("avg_price") or record.get("filled_price")
         if average in (None, "") and filled > order.filled_quantity:
             order.fill_price = None
         order.filled_quantity = int(filled)
