@@ -175,7 +175,7 @@ def fetch_exchange_closure_notices(
                 hour = 0
             if 1 <= hour <= 23:
                 early_close = time(hour, minute)
-        if re.search(r"\b(?:closed all day|markets? closed|market closure|will remain closed|will be closed|not open)\b", lowered):
+        if early_close is None and re.search(r"\b(?:closed all day|markets? closed|will remain closed|will be closed|not open)\b", lowered):
             early_close = None
         source = str(item.get("url") or item.get("title") or "news source")
         notices.append(ExchangeClosureNotice(parsed_date, early_close, source[:300]))

@@ -225,12 +225,18 @@ Live order submission remains disabled.
   Thanksgiving, Christmas, Juneteenth, and known early-close rules. Verified
   NYSE/Nasdaq closure headlines refresh once hourly and persist exact-date
   overrides to `exchange_calendar.json`; ambiguous, undated, or unofficial news
-  is ignored.
+  is ignored. Verified early-close notices persist the exact close time; the
+  bot submits EOD flatten at close minus one minute (for example, 12:59 p.m.
+  for a 1:00 p.m. close or 1:59 p.m. for a 2:00 p.m. close).
 - Entry cutoff (one minute before close) and CORE market close are separate.
   All monitor entries, take-profits, stops, flatten orders, and exit retries
   use MARKET/CORE. They pause outside regular hours; no NIGHT limit-order
   fallback is submitted. An unfinished EOD liquidation request persists and
-  resumes at the next regular open, including after a restart. Missing
+  resumes at the next regular open, including after a restart; existing exit
+  fills are logged before normal candidate scanning resumes. A new entry starts
+  only after broker positions confirm flat and existing account buying-power,
+  price-priority, spread, confirmation, and sizing rules pass again.
+  Missing
   liquidity can still leave overnight exposure. A fatal loop halt exits nonzero
   so the unit's `Restart=on-failure` policy can act; this does not guarantee
   execution. Startup now queries server-side open orders and refuses to start

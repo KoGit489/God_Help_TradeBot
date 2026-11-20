@@ -10,6 +10,7 @@ from god_help_tradebot.schedule import EASTERN
 from god_help_tradebot.broker import WebullSandboxBroker
 from god_help_tradebot.monitor import LoopSummary
 from god_help_tradebot.paper import OrderSide, PaperOrder
+from god_help_tradebot.screen import MarketSnapshot
 
 
 def test_webull_watchdog_does_not_churn_exit_without_bid_depth() -> None:
@@ -74,6 +75,10 @@ def test_failed_ghost_cancel_keeps_order_tracked() -> None:
     assert any(event.kind == "error" for event in summary.events)
 
 
+def _snapshot_market(symbol: str, price: float) -> MarketSnapshot:
+    return MarketSnapshot(symbol, price, 5.0, 500_000, 100_000, price - 0.01, price + 0.01, price * 0.9, price * 1.1)
+
+
 def _quote(symbol: str, bid: str, ask: str) -> Quote:
     return Quote(symbol, Decimal(bid), Decimal(ask), Decimal(bid))
 
@@ -91,6 +96,32 @@ def _loop_with_long_position(bid: str = "2.24", ask: str = "2.25") -> tuple[Moni
         flatten_before_close=False,
     )
     return loop, broker
+
+
+def test_filled_exit_allows_normal_next_entry_same_monitor_cycle() -> None:
+    broker = PaperBroker(10_000)
+    broker.positions["OLD"] = Position(quantity=100, average_price=Decimal("2.50"))
+    broker.last_quotes["OLD"] = _quote("OLD", "2.40", "2.42")
+    broker.last_quotes["NEW"] = _quote("NEW", "3.10", "3.11")
+    loop = MonitorLoop(
+        broker,
+        exit_plans={"OLD": ExitPlan("OLD", 100, Decimal("3.25"), Decimal("2.25"))},
+        snapshot_provider=lambda: [_snapshot_market("NEW", 3.10)],
+        now_provider=_open_now,
+        allow_entries=True,
+        flatten_before_close=False,
+    )
+
+    first = loop.run_once()
+
+    broker.positions["OLD"] = Position(quantity=0, average_price=Decimal("0"))
+    loop._pending_entry = None
+    summary = loop.run_once(first)
+
+    assert broker.positions["OLD"].quantity == 0
+    assert len(summary.entries) == 1
+    assert summary.entries[0].symbol == "NEW"
+    assert not any(event.kind == "trade_reconciliation_wait" for event in summary.events)
 
 
 def test_pending_exit_blocks_duplicate_submits() -> None:
@@ -178,6 +209,30 @@ def test_night_flatten_defers_without_submitting_orders() -> None:
     assert not summary.exits
     assert "GOW" in loop.exit_plans
     assert not any(e.kind == "error" for e in summary.events)
+
+
+def test_exact_2pm_flatten_uses_close_minus_one(tmp_path, monkeypatch) -> None:
+    from god_help_tradebot.schedule import apply_verified_closure_update
+
+    monkeypatch.chdir(tmp_path)
+    applied = apply_verified_closure_update(
+        early_close_dates={datetime(2026, 10, 7, 14, 0).date(): datetime(2026, 10, 7, 14, 0).time()},
+    )
+    assert applied == 1
+
+    broker = PaperBroker(10_000)
+    broker.positions["GOW"] = Position(quantity=100, average_price=Decimal("2.50"))
+    broker.last_quotes["GOW"] = _quote("GOW", "2.40", "2.42")
+    cutoff = datetime(2026, 10, 7, 13, 59, 30, tzinfo=EASTERN)
+    loop = MonitorLoop(
+        broker,
+        exit_plans={"GOW": ExitPlan("GOW", 100, Decimal("3.25"), Decimal("2.25"))},
+        now_provider=lambda: cutoff,
+        flatten_before_close=True,
+    )
+    before = loop.run_once()
+    assert before.exits[0].order_type is OrderType.MARKET
+    assert any(event.kind == "eod_flatten" for event in before.events)
 
 
 def test_359_flatten_uses_core_session_order() -> None:
@@ -339,6 +394,28 @@ def test_flatten_plan_persists_until_position_is_confirmed_flat(tmp_path) -> Non
     loop.run_once()  # fill reconciled, position now flat
 
     assert store.load() == {}
+
+
+def test_exact_2pm_close_persists_and_retries_next_open(tmp_path) -> None:
+    broker = PaperBroker(10_000)
+    broker.positions["GOW"] = Position(100, Decimal("2.50"))
+    broker.last_quotes["GOW"] = _quote("GOW", "2.40", "2.42")
+    store = StateStore(tmp_path / "bot_state.json")
+    evening = MonitorLoop(
+        broker, state_store=store,
+        exit_plans={"GOW": ExitPlan("GOW", 100, Decimal("3.25"), Decimal("2.25"), liquidation_requested=True)},
+        now_provider=lambda: datetime(2026, 10, 7, 20, 30, tzinfo=EASTERN),
+    )
+    assert not evening.run_once().exits
+    assert store.load()["GOW"].liquidation_requested
+
+    morning = MonitorLoop(
+        broker, state_store=store,
+        now_provider=lambda: datetime(2026, 10, 8, 9, 30, tzinfo=EASTERN),
+    )
+    result = morning.run_once()
+    assert len(result.exits) == 1
+    assert any(event.kind == "eod_flatten" for event in result.events)
 
 
 def test_unfinished_flatten_retries_next_open_after_restart(tmp_path) -> None:

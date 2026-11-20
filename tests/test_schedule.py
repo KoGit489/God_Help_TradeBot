@@ -33,6 +33,13 @@ def test_verified_override_persists_and_controls_session(tmp_path, monkeypatch) 
     assert session.market_close.time() == time(13)
 
 
+def test_observed_independence_and_christmas_are_early_close_not_closed() -> None:
+    assert get_trading_session(date(2026, 7, 3)) is not None
+    assert get_trading_session(date(2026, 7, 3)).market_close.time() == time(13)
+    assert get_trading_session(date(2027, 12, 24)) is not None
+    assert get_trading_session(date(2027, 12, 24)).market_close.time() == time(13)
+
+
 def test_known_early_close_has_1259_exit() -> None:
     session = get_trading_session(date(2026, 11, 27))
 

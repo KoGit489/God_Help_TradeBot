@@ -81,7 +81,22 @@ def _holidays(year: int) -> set[date]:
     if new_year is not None:
         holidays.add(new_year)
     holidays.update(_load_override_calendar().get("closed_dates", set()))
+    holidays.difference_update(_known_early_close_dates(year))
     return {day for day in holidays if day.year == year}
+
+
+def _known_early_close_dates(year: int) -> set[date]:
+    dates = set()
+    for month, day in ((7, 3), (12, 24)):
+        candidate = date(year, month, day)
+        if candidate.weekday() < 5:
+            dates.add(candidate)
+    thanksgiving = date(year, 11, 1)
+    thanksgiving += timedelta(days=(3 - thanksgiving.weekday()) % 7 + 21)
+    thanksgiving_eve = thanksgiving + timedelta(days=1)
+    if thanksgiving_eve.weekday() < 5:
+        dates.add(thanksgiving_eve)
+    return dates
 
 
 def _early_close(day: date) -> bool:
