@@ -286,6 +286,35 @@ def test_news_sentiment_uses_only_recent_available_headlines(monkeypatch) -> Non
     assert neutral.score == 0.5
 
 
+def test_exchange_closure_notice_requires_exchange_and_exact_date(monkeypatch):
+    from datetime import timezone
+    import god_help_tradebot.news as news
+
+    news._MARKET_CLOSURE_CACHE.clear()
+    item = {
+        "title": "NYSE will close early at 1:00 p.m. on November 27, 2026",
+        "summary": "The exchange announced an early close for the U.S. stock market.",
+        "source": "official nyse",
+        "url": "https://www.nyse.com/holiday-calendar",
+        "time_published": "20261120T120000",
+    }
+    ambiguous = {**item, "title": "Markets may close during the week"}
+
+    class Response:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"feed": [item, ambiguous]}
+
+    monkeypatch.setattr(news.requests, "get", lambda *args, **kwargs: Response())
+    notices = news.fetch_exchange_closure_notices(api_key="TEST")
+
+    assert len(notices) == 1
+    assert notices[0].closed_date.isoformat() == "2026-11-27"
+    assert notices[0].early_close.hour == 13
+
+
 def test_news_sentiment_network_failure_is_neutral(monkeypatch) -> None:
     def _raise(*a, **k):
         raise RuntimeError("offline")

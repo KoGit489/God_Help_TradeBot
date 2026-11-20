@@ -1,6 +1,6 @@
 from datetime import date, datetime, time
 
-from god_help_tradebot.schedule import EASTERN, get_trading_session
+from god_help_tradebot.schedule import EASTERN, apply_verified_closure_update, get_trading_session
 
 
 def test_weekday_session_has_one_minute_exit_buffer() -> None:
@@ -13,6 +13,24 @@ def test_weekday_session_has_one_minute_exit_buffer() -> None:
 
 def test_holiday_is_not_tradable() -> None:
     assert get_trading_session(date(2026, 12, 25)) is None
+
+
+def test_observed_new_year_edges() -> None:
+    assert get_trading_session(date(2027, 12, 31)) is not None
+    assert get_trading_session(date(2028, 1, 1)) is None
+
+
+def test_verified_override_persists_and_controls_session(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    applied = apply_verified_closure_update(
+        closed_dates={date(2026, 12, 28)},
+        early_close_dates={date(2026, 12, 29): time(13)},
+    )
+    assert applied == 2
+    assert get_trading_session(date(2026, 12, 28)) is None
+    session = get_trading_session(date(2026, 12, 29))
+    assert session is not None
+    assert session.market_close.time() == time(13)
 
 
 def test_known_early_close_has_1259_exit() -> None:

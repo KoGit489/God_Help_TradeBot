@@ -221,6 +221,11 @@ Live order submission remains disabled.
   quote size. The bot does not repeatedly cancel and replace it without usable
   size. `cancel_pending` means replacement is blocked awaiting server
   confirmation. Neither event means the position is flat.
+- The exchange calendar includes standard weekday holidays, Good Friday,
+  Thanksgiving, Christmas, Juneteenth, and known early-close rules. Verified
+  NYSE/Nasdaq closure headlines refresh once hourly and persist exact-date
+  overrides to `exchange_calendar.json`; ambiguous, undated, or unofficial news
+  is ignored.
 - Entry cutoff (one minute before close) and CORE market close are separate.
   All monitor entries, take-profits, stops, flatten orders, and exit retries
   use MARKET/CORE. They pause outside regular hours; no NIGHT limit-order

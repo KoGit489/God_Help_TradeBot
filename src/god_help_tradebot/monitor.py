@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from decimal import Decimal
 from typing import Callable
 
@@ -112,6 +113,7 @@ class MonitorLoop:
         self._market_news: Any | None = None
         self._consecutive_errors = 0
         self._rate_limit_backoff_active = False
+        self._exchange_calendar_refresh_at = 0.0
         # Symbols whose exit was rejected for the current session (e.g. not
         # eligible for overnight trading); retried when the session changes.
         self._exit_blocked: dict[str, str] = {}
@@ -209,9 +211,40 @@ class MonitorLoop:
             )
         return summary
 
+    def _maybe_refresh_exchange_calendar(self, summary: LoopSummary) -> None:
+        if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
+            return
+        if not getattr(getattr(self.broker, "config", None), "api_key", None):
+            return
+        now = time.monotonic()
+        if now - self._exchange_calendar_refresh_at < 3600:
+            return
+        self._exchange_calendar_refresh_at = now
+        from .news import fetch_exchange_closure_notices
+        from .schedule import apply_verified_closure_update
+
+        notices = fetch_exchange_closure_notices()
+        closed = set()
+        early = {}
+        today = self._now().date()
+        for notice in notices:
+            if not today - timedelta(days=1) <= notice.closed_date <= today + timedelta(days=365):
+                continue
+            if notice.early_close is None:
+                closed.add(notice.closed_date)
+            else:
+                early[notice.closed_date] = notice.early_close
+        if closed or early:
+            applied = apply_verified_closure_update(closed, early)
+            summary.events.append(LoopEvent(
+                "exchange_calendar_update", "market",
+                f"verified closure overrides persisted; entries={applied}",
+            ))
+
     def _run_cycle(self, summary: LoopSummary) -> None:
         summary.polls += 1
 
+        self._maybe_refresh_exchange_calendar(summary)
         self._sync_orders()
         self._reconcile_pending_entry(summary)
         self._log_fills(summary)
