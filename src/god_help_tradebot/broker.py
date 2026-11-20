@@ -772,6 +772,12 @@ def _quote_from_snapshot(record: dict[str, Any]) -> Quote:
     symbol = str(record.get("symbol") or record.get("ticker") or "").upper()
     if not symbol:
         raise ValueError("snapshot record is missing a symbol")
+    overnight_price = Decimal(str(record["ovn_price"])) if record.get("ovn_price") not in (None, "") else None
+    overnight_change = Decimal(str(record["ovn_change_ratio"])) * Decimal("100") if record.get("ovn_change_ratio") not in (None, "") else None
+    overnight_volume = Decimal(str(record["ovn_volume"])) if record.get("ovn_volume") not in (None, "") else None
+    extended_price = Decimal(str(record["ext_price"])) if record.get("ext_price") not in (None, "") else None
+    extended_change = Decimal(str(record["ext_change_ratio"])) * Decimal("100") if record.get("ext_change_ratio") not in (None, "") else None
+    extended_volume = Decimal(str(record["ext_volume"])) if record.get("ext_volume") not in (None, "") else None
     return Quote(
         symbol=symbol,
         bid=_decimal_field(record, "bid", default=last),
@@ -779,6 +785,12 @@ def _quote_from_snapshot(record: dict[str, Any]) -> Quote:
         last=last,
         bid_volume=(Decimal(str(record["bid_volume"])) if record.get("bid_volume") not in (None, "") else None),
         ask_volume=(Decimal(str(record["ask_volume"])) if record.get("ask_volume") not in (None, "") else None),
+        overnight_price=overnight_price,
+        overnight_change_ratio=overnight_change,
+        overnight_volume=overnight_volume,
+        extended_price=extended_price,
+        extended_change_ratio=extended_change,
+        extended_volume=extended_volume,
     )
 
 

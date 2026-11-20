@@ -67,6 +67,12 @@ def _snapshot_from(data: dict[str, Any]) -> MarketSnapshot:
         day_high=float(data["day_high"]),
         open_price=float(data["open_price"]) if data.get("open_price") is not None else None,
         previous_close=float(data["previous_close"]) if data.get("previous_close") is not None else None,
+        overnight_price=float(data["overnight_price"]) if data.get("overnight_price") is not None else None,
+        overnight_change_ratio=float(data["overnight_change_ratio"]) if data.get("overnight_change_ratio") is not None else None,
+        overnight_volume=float(data["overnight_volume"]) if data.get("overnight_volume") is not None else None,
+        extended_price=float(data["extended_price"]) if data.get("extended_price") is not None else None,
+        extended_change_ratio=float(data["extended_change_ratio"]) if data.get("extended_change_ratio") is not None else None,
+        extended_volume=float(data["extended_volume"]) if data.get("extended_volume") is not None else None,
     )
 
 

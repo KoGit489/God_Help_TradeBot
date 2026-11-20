@@ -18,6 +18,12 @@ class MarketSnapshot:
     day_high: float
     open_price: float | None = None
     previous_close: float | None = None
+    overnight_price: float | None = None
+    overnight_change_ratio: float | None = None
+    overnight_volume: float | None = None
+    extended_price: float | None = None
+    extended_change_ratio: float | None = None
+    extended_volume: float | None = None
 
     @property
     def gap_percent(self) -> float | None:
@@ -103,6 +109,16 @@ def explosive_score(snapshot: MarketSnapshot, direction: str = "long") -> float:
     velocity = min(abs(snapshot.change_percent) / 30, 1.0)
     gap = snapshot.gap_percent
     from_open = snapshot.from_open_percent
+    tape_signals = []
+    if snapshot.overnight_change_ratio is not None:
+        tape_signals.append(snapshot.overnight_change_ratio)
+    if snapshot.extended_change_ratio is not None:
+        tape_signals.append(snapshot.extended_change_ratio)
+    if tape_signals:
+        sign = -1 if direction == "short" else 1
+        directional_tape = sum(sign * value for value in tape_signals) / len(tape_signals)
+        tape_bonus = min(max(directional_tape / 30, -0.20), 0.20)
+        velocity = min(max(velocity + tape_bonus, 0), 1)
     if gap is not None and from_open is not None:
         sign = -1 if direction == "short" else 1
         gap_velocity = min(max(sign * gap / 30, 0), 1)

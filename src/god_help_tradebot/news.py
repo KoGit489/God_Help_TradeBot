@@ -160,7 +160,21 @@ def fetch_exchange_closure_notices(
         if parsed_date is None:
             continue
 
-        early_close = time(13, 0) if re.search(r"\b(?:early close|close early|closes early|1:00\s*p\.?m\.?)\b", lowered) else None
+        early_close = None
+        early_time_match = re.search(
+            r"\b([12]?\d):([0-5]\d)\s*(a\.?m\.?|p\.?m\.?)\b",
+            lowered,
+        )
+        if early_time_match and re.search(r"\b(?:early close|close early|closes early)\b", lowered):
+            hour = int(early_time_match.group(1))
+            minute = int(early_time_match.group(2) or 0)
+            meridiem = early_time_match.group(3)
+            if meridiem and "p" in meridiem and hour < 12:
+                hour += 12
+            if meridiem and "a" in meridiem and hour == 12:
+                hour = 0
+            if 1 <= hour <= 23:
+                early_close = time(hour, minute)
         if re.search(r"\b(?:closed all day|markets? closed|market closure|will remain closed|will be closed|not open)\b", lowered):
             early_close = None
         source = str(item.get("url") or item.get("title") or "news source")

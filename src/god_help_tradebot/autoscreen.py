@@ -183,7 +183,16 @@ def enrich_with_quotes(
         quote = quotes.get(snapshot.symbol)
         if quote is None or quote.bid <= 0 or quote.ask <= 0:
             continue
-        enriched.append(replace(snapshot, bid=float(quote.bid), ask=float(quote.ask)))
+        enriched.append(replace(
+            snapshot,
+            bid=float(quote.bid), ask=float(quote.ask),
+            overnight_price=float(quote.overnight_price) if quote.overnight_price is not None else None,
+            overnight_change_ratio=float(quote.overnight_change_ratio) if quote.overnight_change_ratio is not None else None,
+            overnight_volume=float(quote.overnight_volume) if quote.overnight_volume is not None else None,
+            extended_price=float(quote.extended_price) if quote.extended_price is not None else None,
+            extended_change_ratio=float(quote.extended_change_ratio) if quote.extended_change_ratio is not None else None,
+            extended_volume=float(quote.extended_volume) if quote.extended_volume is not None else None,
+        ))
     return enriched
 
 

@@ -52,6 +52,10 @@ class _FakeMarketData:
                     "price": str(quote.last),
                     "bid": str(quote.bid),
                     "ask": str(quote.ask),
+                    "ovn_price": str(quote.overnight_price) if quote.overnight_price is not None else None,
+                    "ovn_change_ratio": str(Decimal(str(quote.overnight_change_ratio)) / Decimal("100")) if quote.overnight_change_ratio is not None else None,
+                    "ext_price": str(quote.extended_price) if quote.extended_price is not None else None,
+                    "ext_change_ratio": str(Decimal(str(quote.extended_change_ratio)) / Decimal("100")) if quote.extended_change_ratio is not None else None,
                 })
         return _FakeResponse(rows)
 
@@ -118,7 +122,11 @@ def test_fetch_top_gainers_returns_rows_from_broker() -> None:
 
 
 def test_enrich_with_quotes_replaces_placeholder_bid_ask() -> None:
-    quote = Quote("GOW", Decimal("3.10"), Decimal("3.12"), Decimal("3.11"))
+    quote = Quote(
+        "GOW", Decimal("3.10"), Decimal("3.12"), Decimal("3.11"),
+        overnight_price=Decimal("3.08"), overnight_change_ratio=Decimal("8"),
+        extended_price=Decimal("3.13"), extended_change_ratio=Decimal("10"),
+    )
     broker = _broker([], {"GOW": quote})
     row = _row("GOW", 3.18, 1.98, 500_000, 2.5, 2.80, 3.40)
     snapshot = screener_row_to_snapshot({**row, "open": "3.05", "pre_close": "2.90"})
@@ -127,6 +135,10 @@ def test_enrich_with_quotes_replaces_placeholder_bid_ask() -> None:
 
     assert enriched[0].bid == 3.10
     assert enriched[0].ask == 3.12
+    assert enriched[0].overnight_price == 3.08
+    assert enriched[0].overnight_change_ratio == 8.0
+    assert enriched[0].extended_price == 3.13
+    assert enriched[0].extended_change_ratio == 10.0
     assert enriched[0].open_price == 3.05
     assert enriched[0].previous_close == 2.90
 

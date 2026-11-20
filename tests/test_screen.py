@@ -59,6 +59,15 @@ def test_explosive_score_favors_follow_through_over_a_gap_reversal(direction, pr
     assert explosive_score(replace(continuation, previous_close=float("nan")), direction) == explosive_score(base, direction)
 
 
+def test_overnight_and_extended_change_support_directional_ranking() -> None:
+    base = snapshot("TEST", 10, 8, 4)
+    bullish_tape = replace(base, overnight_change_ratio=20.0, extended_change_ratio=15.0)
+    bearish_tape = replace(base, overnight_change_ratio=-20.0, extended_change_ratio=-15.0)
+    assert explosive_score(bullish_tape, "long") > explosive_score(base, "long")
+    assert explosive_score(bearish_tape, "short") > explosive_score(base, "short")
+    assert explosive_score(bearish_tape, "long") < explosive_score(base, "long")
+
+
 def test_snapshot_metrics_are_transparent() -> None:
     candidate = snapshot("TEST", 10, 4, 0.5)
 

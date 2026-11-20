@@ -29,6 +29,12 @@ class Quote:
     last: Decimal
     bid_volume: Decimal | None = None
     ask_volume: Decimal | None = None
+    overnight_price: Decimal | None = None
+    overnight_change_ratio: Decimal | None = None
+    overnight_volume: Decimal | None = None
+    extended_price: Decimal | None = None
+    extended_change_ratio: Decimal | None = None
+    extended_volume: Decimal | None = None
 
 
 @dataclass

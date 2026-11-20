@@ -59,6 +59,14 @@ class SessionRecorder:
             "day_high": snapshot.day_high,
             "open_price": snapshot.open_price,
             "previous_close": snapshot.previous_close,
+            "overnight_price": snapshot.overnight_price,
+            "overnight_change_ratio": snapshot.overnight_change_ratio,
+            "overnight_volume": snapshot.overnight_volume,
+            "extended_price": snapshot.extended_price,
+            "extended_change_ratio": snapshot.extended_change_ratio,
+            "extended_volume": snapshot.extended_volume,
+            "open_price": snapshot.open_price,
+            "previous_close": snapshot.previous_close,
         }
 
     @staticmethod
