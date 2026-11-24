@@ -84,6 +84,7 @@ class EquityPerformanceStore:
             "version": 1, "account_id": account_id, "trades": [], "reviews": [],
             "active": {}, "orders": {}, "fills": {}, "adaptive": {},
             "reviewed_count": 0, "paused": False, "take_profit_sessions": {},
+            "fallback_reviews": [],
         }
         if self.path.exists():
             try:
@@ -129,6 +130,12 @@ class EquityPerformanceStore:
                         raise ValueError("invalid fill checkpoint")
                 if not isinstance(self.data["reviewed_count"], int) or not 0 <= self.data["reviewed_count"] <= len(self.data["trades"]):
                     raise ValueError("invalid review count")
+                fallback_reviews = self.data["fallback_reviews"]
+                if not isinstance(fallback_reviews, list) or any(
+                    not isinstance(review, dict) or type(review.get("wins")) is not int
+                    or not 0 <= review["wins"] <= 5 for review in fallback_reviews
+                ) or len(fallback_reviews) * 5 > sum(trade.get("fallback") is True for trade in loaded["trades"]):
+                    raise ValueError("invalid fallback reviews")
             except (OSError, ValueError, TypeError, KeyError, InvalidOperation) as error:
                 raise RuntimeError("Equity performance ledger unreadable or belongs to another account; reconcile before startup") from error
         else:
@@ -147,13 +154,15 @@ class EquityPerformanceStore:
     def recovery_ids(self) -> frozenset[str]:
         return frozenset(self.data["orders"])
 
-    def track_order(self, order: PaperOrder, role: str) -> None:
+    def track_order(self, order: PaperOrder, role: str, *, fallback: bool = False) -> None:
         key = self.key(order)
         if key not in self.data["orders"]:
             self.data["orders"][key] = {
                 "symbol": order.symbol, "side": order.side.value,
                 "quantity": order.quantity, "role": role,
             }
+            if role == "ENTRY" and fallback:
+                self.data["orders"][key]["fallback"] = True
             self.save()
 
     def record_fill(self, order: PaperOrder, role: str, now: datetime) -> None:
@@ -198,6 +207,8 @@ class EquityPerformanceStore:
                     "opened_at": now.isoformat(), "entry_quantity": 0,
                     "entry_notional": "0", "exit_quantity": 0, "exit_notional": "0",
                 }
+                if self.data["orders"].get(key, {}).get("fallback") is True:
+                    trade["fallback"] = True
                 self.data["active"][order.symbol] = trade
             trade["entry_quantity"] += delta
             trade["entry_notional"] = str(Decimal(trade["entry_notional"]) + incremental)
@@ -277,9 +288,37 @@ class EquityPerformanceStore:
             self.data["reviews"].append(review)
             self.data["reviewed_count"] += 5
             reviews.append(review)
+        if completed:
+            reviews.extend(self._review_fallback(now))
         if completed or reviews or self.data["paused"] or recovered_fill_pause:
             self.save()
         return completed, reviews
+
+    @property
+    def fallback_tightening_level(self) -> int:
+        return min(4, sum(review["wins"] < 4 for review in self.data["fallback_reviews"]))
+
+    def _review_fallback(self, now: datetime) -> list[dict[str, Any]]:
+        history = self.data["fallback_reviews"]
+        trades = [trade for trade in self.data["trades"] if trade.get("fallback") is True]
+        start = len(history) * 5
+        if len(trades) - start < 5:
+            return []
+        new_reviews = []
+        cumulative = sum((Decimal(trade["realized_pnl_usd"]) for trade in trades[:start]), Decimal("0.00"))
+        for offset in range(start, len(trades) - 4, 5):
+            window = trades[offset:offset + 5]
+            wins = sum(trade["outcome"] == "win" for trade in window)
+            pnl = sum((Decimal(trade["realized_pnl_usd"]) for trade in window), Decimal("0.00"))
+            cumulative += pnl
+            previous_level = self.fallback_tightening_level
+            review = {"kind": "fallback", "through_trade": offset + 5, "reviewed_at": now.isoformat(),
+                      "wins": wins, "trades": 5, "target_wins": 4, "realized_pnl_usd": str(pnl),
+                      "cumulative_pnl_usd": str(cumulative),
+                      "tightening_level": min(4, previous_level + (wins < 4))}
+            history.append(review)
+            new_reviews.append(review)
+        return new_reviews
 
     def effective_config(self, config: BotConfig) -> BotConfig:
         overrides = {name: value for name, value in self.data["adaptive"].items() if name != "min_confirmation_score"}

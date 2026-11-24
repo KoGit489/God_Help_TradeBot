@@ -254,9 +254,20 @@ class MonitorLoop:
             for trade in completed:
                 summary.events.append(LoopEvent("trade_completed", trade["symbol"],
                                                 f"P&L ${trade['realized_pnl_usd']} [{trade['outcome']}]"))
+                if trade.get("fallback") is True:
+                    summary.events.append(LoopEvent("fallback_trade_completed", trade["symbol"],
+                                                    f"P&L ${trade['realized_pnl_usd']} [{trade['outcome']}]"))
             for review in reviews:
-                summary.events.append(LoopEvent("trade_performance_review", "account",
-                                                f"{review['wins']}/5 winners; target 4/5; tightened={review['changes']}; paused={review['paused']}"))
+                if review.get("kind") == "fallback":
+                    summary.events.append(LoopEvent(
+                        "fallback_performance_review", "account",
+                        f"{review['wins']}/5 winners; target 4/5; batch P&L ${review['realized_pnl_usd']}; "
+                        f"cumulative P&L ${review['cumulative_pnl_usd']}; "
+                        f"through fallback trade {review['through_trade']}; tightening level {review['tightening_level']}/4",
+                    ))
+                else:
+                    summary.events.append(LoopEvent("trade_performance_review", "account",
+                                                    f"{review['wins']}/5 winners; target 4/5; tightened={review['changes']}; paused={review['paused']}"))
             self.config = self.performance_store.effective_config(self._base_config)
             self.min_confirmation_score = max(self._base_confirmation_score, self.performance_store.data["adaptive"].get("min_confirmation_score", 0))
         for symbol in self._filled_exits_pending_reconcile:
@@ -844,13 +855,15 @@ class MonitorLoop:
         bearish survivors (losers). With paradox_fallback on, the entry trades
         the OPPOSITE direction of the read.
         """
+        level = self.performance_store.fallback_tightening_level if self.performance_store is not None else 0
+        base_relative_volume = max(1.0, self.config.min_relative_volume / 2) if self.performance_store is not None else 1.0
         relaxed = dataclasses.replace(
             self.config,
             min_change_percent=-5.0,
             max_change_percent=100.0,
-            min_relative_volume=max(1.0, self.config.min_relative_volume / 2) if self.performance_store is not None else 1.0,
+            min_relative_volume=base_relative_volume + 0.25 * level,
             min_average_volume=50_000,
-            max_spread_percent=3.0,
+            max_spread_percent=3.0 - 0.5 * level,
         )
         bulls = screen_candidates(snapshots, relaxed)
         # Bearish reads only count as "rejected by the gates" when the gates
@@ -1289,7 +1302,7 @@ class MonitorLoop:
         self._pending_entry = snapshot.symbol
         self._entry_order_ids.add(order.order_id)
         if self.performance_store is not None:
-            self.performance_store.track_order(order, "ENTRY")
+            self.performance_store.track_order(order, "ENTRY", fallback=is_fallback)
         self._pending_limit = {
             "order_id": order.order_id, "symbol": snapshot.symbol,
             "side": OrderSide.BUY, "quantity": plan.quantity, "polls": 0,
@@ -1350,7 +1363,7 @@ class MonitorLoop:
         self._pending_entry = snapshot.symbol
         self._entry_order_ids.add(order.order_id)
         if self.performance_store is not None:
-            self.performance_store.track_order(order, "ENTRY")
+            self.performance_store.track_order(order, "ENTRY", fallback=is_fallback)
         self._pending_limit = {
             "order_id": order.order_id, "symbol": snapshot.symbol,
             "side": OrderSide.SHORT, "quantity": plan.quantity, "polls": 0,

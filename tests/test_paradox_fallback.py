@@ -95,8 +95,9 @@ def test_price_priority_fallback_ranks_eligible_reads(monkeypatch, bearish, para
     assert selected[0].profile == ("fallback_loser" if bearish else "fallback")
 
 
-def test_price_priority_keeps_inverse_fallback_and_refreshes_entry_funds():
+def test_price_priority_keeps_inverse_fallback_and_refreshes_entry_funds(tmp_path):
     from god_help_tradebot.monitor import LoopSummary
+    from god_help_tradebot.state import EquityPerformanceStore
 
     for change, expected_side in ((6, OrderSide.SHORT), (-6, OrderSide.BUY)):
         snapshot = _snapshot("HIGH", 300, change, 1.5, 290, 330)
@@ -104,13 +105,32 @@ def test_price_priority_keeps_inverse_fallback_and_refreshes_entry_funds():
         funds = iter([Decimal("1000"), Decimal("600")])
         broker.get_buying_power = lambda: next(funds)
         broker.last_quotes["HIGH"] = Quote("HIGH", Decimal("299.99"), Decimal("300.01"), Decimal("300"))
-        loop = MonitorLoop(broker, BotConfig(account_price_priority=True, allow_shorts=True), now_provider=_open_now)
+        ledger = EquityPerformanceStore(tmp_path / f"{expected_side.value}.json", "test-account")
+        loop = MonitorLoop(broker, BotConfig(account_price_priority=True, allow_shorts=True), now_provider=_open_now,
+                   performance_store=ledger)
         summary = LoopSummary()
         chosen = loop._select_candidate([snapshot], summary)
         assert chosen[1] is True
         loop._enter(chosen, summary)
         assert summary.entries[0].side is expected_side
         assert summary.entries[0].quantity == 1
+        assert ledger.data["orders"][ledger.key(summary.entries[0])]["fallback"] is True
+
+
+@pytest.mark.parametrize("snapshot_provider", [_bullish_fallback, _bearish_fallback])
+def test_fallback_tightening_filters_weak_reads_without_changing_primary_config(tmp_path, snapshot_provider):
+    from god_help_tradebot.monitor import LoopSummary
+    from god_help_tradebot.state import EquityPerformanceStore
+
+    ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
+    config = BotConfig(allow_shorts=True, min_relative_volume=2)
+    loop = MonitorLoop(PaperBroker(1_000), config, now_provider=_open_now, performance_store=ledger)
+    snapshot = snapshot_provider()
+    assert loop._best_odds_fallback([snapshot], LoopSummary()) is not None
+    ledger.data["fallback_reviews"] = [{"wins": 3}] * 5
+    assert ledger.fallback_tightening_level == 4
+    assert loop._best_odds_fallback([snapshot], LoopSummary()) is None
+    assert loop.config == config
 
 
 def test_bullish_fallback_gets_shorted() -> None:

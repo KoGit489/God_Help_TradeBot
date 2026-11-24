@@ -128,6 +128,25 @@ sample. Tightening is a heuristic policy, not verified improvement or a guarante
 of 80% wins, profitability, or durability across future market regimes. Fees and
 borrow costs are not included in the ledger's gross P&L.
 
+### Fallback five-trade review
+
+New long and short fallback entries are tagged at order tracking and counted
+only once their fills reconcile and the position is flat. Previously untagged
+trades are not guessed or imported. `fallback_trade_completed` logs each
+trade's gross realized P&L. `fallback_performance_review` logs each group of
+five fallback trades, the number of winners, batch and cumulative fallback
+P&L through that batch, and the current tightening level. A 4/5 batch can
+still lose money, so check both figures.
+
+A score below 4/5 raises the fallback screening level by one, up to four.
+Each level adds 0.25 to the fallback relative-volume minimum and reduces the
+snapshot spread cap by 0.5 percentage points. Good batches retain the current
+level. This review changes only fallback screening and does not itself pause
+entries. Fallback trades still count toward the separate all-trades review.
+History and tightening survive restarts and upgrades as long as the account's
+`equity_performance.json` is retained and backed up. These tighter filters are
+a heuristic, not evidence that future trades will be more accurate.
+
 ### Five-session take-profit review
 
 The equity ledger also records one result per observed regular U.S. trading

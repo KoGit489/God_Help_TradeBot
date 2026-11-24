@@ -36,6 +36,49 @@ def test_missed_trade_target_at_tightening_limits_pauses_new_entries(tmp_path):
     assert ledger.data["paused"] is True
 
 
+def test_fallback_review_tracks_only_tagged_fills_and_persists_pnl_and_tightening(tmp_path):
+    path = tmp_path / "performance.json"
+    ledger = EquityPerformanceStore(path, "test-account")
+    config = BotConfig()
+    now = _open_now()
+
+    def close_trade(number, pnl, *, fallback=True, short=False):
+        nonlocal ledger
+        entry = PaperOrder(number * 2, "TEST", OrderSide.SHORT if short else OrderSide.BUY,
+                           1, OrderType.MARKET, status=OrderStatus.FILLED, fill_price=Decimal("100"))
+        ledger.track_order(entry, "ENTRY", fallback=fallback)
+        ledger = EquityPerformanceStore(path, "test-account")
+        ledger.record_fill(entry, "ENTRY", now)
+        ledger = EquityPerformanceStore(path, "test-account")
+        exit_order = PaperOrder(number * 2 + 1, "TEST", OrderSide.BUY if short else OrderSide.SELL,
+                                1, OrderType.MARKET, status=OrderStatus.FILLED,
+                                fill_price=Decimal(100 - pnl if short else 100 + pnl))
+        ledger.record_fill(exit_order, "EXIT", now)
+        completed, reviews = ledger.finalize({}, now, config, 0.5)
+        assert (completed[0].get("fallback") is True) is fallback
+        return [review for review in reviews if review.get("kind") == "fallback"]
+
+    assert close_trade(1, 50, fallback=False) == []
+    for number, profit in enumerate((5, 5, 5, 0), 2):
+        assert close_trade(number, profit) == []
+    assert ledger.data["reviews"][0]["wins"] == 4
+    assert ledger.fallback_tightening_level == 0
+    first, = close_trade(6, -20, short=True)
+    assert (first["wins"], first["realized_pnl_usd"], first["cumulative_pnl_usd"]) == (3, "-5.00", "-5.00")
+    assert ledger.data["adaptive"] == {}
+    assert not ledger.data["paused"]
+
+    ledger = EquityPerformanceStore(path, "test-account")
+    assert ledger.fallback_tightening_level == 1
+    assert ledger.finalize({}, now, config, 0.5)[1] == []
+    for number in range(7, 11):
+        assert close_trade(number, 1) == []
+    second, = close_trade(11, -10)
+    assert (second["wins"], second["realized_pnl_usd"], second["cumulative_pnl_usd"]) == (4, "-6.00", "-11.00")
+    assert second["tightening_level"] == 1
+    assert EquityPerformanceStore(path, "test-account").data["fallback_reviews"] == [first, second]
+
+
 def test_unpriced_fill_and_account_mismatch_require_reconciliation(tmp_path):
     ledger = EquityPerformanceStore(tmp_path / "performance.json", "test-account")
     order = PaperOrder(1, "TEST", OrderSide.BUY, 10, OrderType.MARKET,
