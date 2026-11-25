@@ -208,3 +208,99 @@ def test_worker_filters_credentials_and_keeps_process_isolated(tmp_path, monkeyp
     worker.tick(BotConfig())
     assert len(calls) == 1
     worker.close()
+
+
+def historical_response(times, status=200):
+    from types import SimpleNamespace
+    bars = [dict(time=when.isoformat(), open="1", high="2", low="0.5", close="1", volume="100") for when in times]
+    return SimpleNamespace(status_code=status, json=lambda: {"result": [{"symbol": "TEST", "result": bars}]})
+
+
+def test_webull_history_pages_backward_resumes_and_stops_at_empty_page(tmp_path):
+    from god_help_tradebot.webull_history import WebullHistoryCollector
+    from god_help_tradebot.research import read_json
+
+    now = datetime(2026, 11, 25, 12, tzinfo=EASTERN)
+    calls = []
+    responses = iter([historical_response([now - timedelta(days=1), now - timedelta(days=1)]),
+                      historical_response([now - timedelta(days=2)]), historical_response([])])
+    def get_bars(*args, **kwargs):
+        calls.append(kwargs)
+        return next(responses)
+    collector = WebullHistoryCollector(tmp_path, get_bars)
+    collector.seed(["TEST"], now)
+    assert collector.tick(now)["bars"] == 1
+    assert collector.tick(now)["status"] == "cooldown"
+    restored = WebullHistoryCollector(tmp_path, get_bars)
+    assert restored.tick(now + timedelta(minutes=2))["bars"] == 2
+    assert calls[1]["end_time"] < calls[0]["end_time"]
+    assert calls[0]["trading_sessions"] == ["PRE", "RTH", "ATH", "OVN"]
+    assert calls[0]["count"] == 1200
+    assert "start_time" not in calls[0]
+    assert restored.tick(now + timedelta(minutes=4))["status"] == "exhausted"
+    assert read_json(tmp_path / "coverage.json")["promotion_eligible"] is False
+
+
+def test_webull_history_does_not_loop_when_api_ignores_older_cursor(tmp_path):
+    from god_help_tradebot.webull_history import WebullHistoryCollector
+
+    now = datetime(2026, 11, 25, tzinfo=EASTERN)
+    response = historical_response([now - timedelta(days=1)])
+    collector = WebullHistoryCollector(tmp_path, lambda *args, **kwargs: response)
+    collector.seed(["TEST"], now)
+    assert collector.tick(now)["status"] == "collecting"
+    assert collector.tick(now + timedelta(minutes=2))["status"] == "no_progress"
+    assert collector.tick(now + timedelta(minutes=4))["status"] == "idle"
+
+
+@pytest.mark.parametrize("status, expected", [(403, "permission_blocked"), (429, "rate_limited")])
+def test_webull_history_handles_permissions_and_backoff_without_advancing_cursor(tmp_path, status, expected):
+    from god_help_tradebot.webull_history import WebullHistoryCollector
+    from god_help_tradebot.research import read_json
+
+    now = datetime(2026, 11, 25, tzinfo=EASTERN)
+    collector = WebullHistoryCollector(tmp_path, lambda *args, **kwargs: historical_response([], status))
+    collector.seed(["TEST"], now)
+    initial = read_json(tmp_path / "collection.json")["symbols"]["TEST-M5"]["end_time"]
+    assert collector.tick(now)["status"] == expected
+    assert read_json(tmp_path / "collection.json")["symbols"]["TEST-M5"]["end_time"] == initial
+    assert collector.tick(now + timedelta(seconds=30))["status"] == "cooldown"
+
+
+def test_webull_history_targets_five_years_with_leap_day_safe_bounds(tmp_path):
+    from god_help_tradebot.webull_history import WebullHistoryCollector
+    from god_help_tradebot.research import read_json
+
+    now = datetime(2028, 2, 29, tzinfo=EASTERN)
+    minute = WebullHistoryCollector(tmp_path, lambda *args, **kwargs: historical_response([]))
+    daily = WebullHistoryCollector(tmp_path, lambda *args, **kwargs: historical_response([]), timespan="D")
+    minute.seed(["TEST"], now)
+    daily.seed(["TEST"], now)
+    records = read_json(tmp_path / "collection.json")["symbols"]
+    assert records["TEST-M5"]["start_time"] == int(datetime(2023, 2, 28, tzinfo=EASTERN).timestamp() * 1000)
+    assert records["TEST-D"]["start_time"] == int(datetime(2023, 2, 28, tzinfo=EASTERN).timestamp() * 1000)
+
+
+def test_webull_history_defers_api_calls_while_managing_position(tmp_path):
+    from types import SimpleNamespace
+    from god_help_tradebot.webull_history import WebullHistoryResearch
+
+    history = WebullHistoryResearch(tmp_path, lambda *args, **kwargs: pytest.fail("must defer history for positions"))
+    loop = SimpleNamespace(exit_plans={"TEST": object()})
+    assert history.tick(loop)["status"] == "deferred_for_trading"
+
+
+def test_daily_history_uses_verified_end_only_paging(tmp_path):
+    from god_help_tradebot.webull_history import WebullHistoryCollector
+
+    now = datetime(2026, 11, 25, tzinfo=EASTERN)
+    calls = []
+    def get_bars(*args, **kwargs):
+        calls.append(kwargs)
+        return historical_response([now - timedelta(days=1)])
+    collector = WebullHistoryCollector(tmp_path, get_bars, timespan="D")
+    collector.seed(["TEST"], now)
+    collector.tick(now)
+    assert "end_time" in calls[0]
+    assert "start_time" not in calls[0]
+    assert "trading_sessions" not in calls[0]

@@ -134,6 +134,7 @@ def run_bot(
     stop_requested = {"flag": False}
     research_worker = None
     execution_controller = None
+    webull_history = None
     if config.research_enabled:
         from .research import ExecutionController, ResearchWorker
         if performance_store is None:
@@ -142,6 +143,9 @@ def run_bot(
         research_worker = ResearchWorker(root, Path(data_dir).resolve())
         execution_controller = ExecutionController(root)
         execution_controller.restore(loop)
+        from .webull_history import WebullHistoryResearch
+        if isinstance(broker, WebullSandboxBroker):
+            webull_history = WebullHistoryResearch(root / "webull", broker.session.data_client.market_data.get_batch_history_bar)
 
     if config.account_price_priority:
         buying_power = loop._account_value()
@@ -176,6 +180,13 @@ def run_bot(
                 except Exception as error:
                     logger.warning("[research_wait] %s: research error; account execution continues", type(error).__name__)
             loop.run_once(summary)
+            if webull_history is not None:
+                try:
+                    collection = webull_history.tick(loop)
+                    if collection["status"] not in ("cooldown", "idle", "deferred_for_trading", "deferred_for_reconciliation"):
+                        logger.info("[webull_history] %s", collection)
+                except Exception as error:
+                    logger.warning("[webull_history_wait] %s; account execution continues", type(error).__name__)
             seen_events = _log_events(logger, summary, seen_events, review_loggers)
             if performance_store is not None and max_polls is None and len(summary.events) > 1000:
                 del summary.events[:-1000]

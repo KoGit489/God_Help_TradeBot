@@ -234,7 +234,7 @@ def bear_pattern_score_for_symbol(
     try:
         response = broker.session.data_client.market_data.get_history_bar(
             symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count),
-            **({"trading_sessions": ["PRE", "RTH", "POST", "OVN"], "real_time_required": True} if getattr(broker, "daily_peak_mode", False) else {}),
+            **({"trading_sessions": ["PRE", "RTH", "ATH", "OVN"], "real_time_required": True} if getattr(broker, "daily_peak_mode", False) else {}),
         )
         bars = bars_from_response(response.json())
     except Exception:
@@ -253,7 +253,7 @@ def trend_direction(
     try:
         response = broker.session.data_client.market_data.get_history_bar(
             symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count),
-            **({"trading_sessions": ["PRE", "RTH", "POST", "OVN"], "real_time_required": True} if getattr(broker, "daily_peak_mode", False) else {}),
+            **({"trading_sessions": ["PRE", "RTH", "ATH", "OVN"], "real_time_required": True} if getattr(broker, "daily_peak_mode", False) else {}),
         )
         bars = bars_from_response(response.json())
     except Exception:
@@ -281,7 +281,7 @@ def pattern_score_for_symbol(
     try:
         response = broker.session.data_client.market_data.get_history_bar(
             symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count),
-            **({"trading_sessions": ["PRE", "RTH", "POST", "OVN"], "real_time_required": True} if getattr(broker, "daily_peak_mode", False) else {}),
+            **({"trading_sessions": ["PRE", "RTH", "ATH", "OVN"], "real_time_required": True} if getattr(broker, "daily_peak_mode", False) else {}),
         )
         bars = bars_from_response(response.json())
     except Exception:

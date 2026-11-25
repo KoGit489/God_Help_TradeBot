@@ -197,6 +197,60 @@ Check `research/report.json`, `research/worker.log`, and the app's
 events. Keep the execution ledger and research artifacts backed up. Validation
 and paper fills do not guarantee real-market profitability.
 
+## Webull Historical Collection
+
+With research enabled, the bot now collects Webull historical bars for observed
+tickers. It seeds up to 20 observed symbols at a time, keeps at most 200
+symbol/interval series, and fetches one page per minute only when no position
+or pending order needs management. Minute and daily series share the same
+request cooldown. It does not place orders or purchase subscriptions.
+
+The collector targets five years. Webull's current reference documents maximum
+query ranges of 180 days for minute bars and five years for daily bars; these
+are not promises that every symbol has that much available history. The pager
+uses capped, end-bounded pages and moves backward until the target, an empty
+older page, or a no-progress/permission boundary. The coverage report records
+the oldest data actually returned. Each request is capped at 1,200 bars. The
+configured sandbox rejected explicit start/end ranges with `ILLEGAL_PARAMETER`
+but accepted end-only paging; that verified request shape is used. Daily
+requests omit intraday session filters; intraday requests use PRE/RTH/ATH/OVN.
+
+Daily bars are forward-adjusted and remain broad price context; they are never
+substituted for intraday executable bid/ask data. Collected M5 bars are likewise
+price history, not historical orderflow, borrow availability or a delisted
+universe. `research/webull/price-context.json` provides observed close-price
+drawdown and bar-range diagnostics, explicitly NOT a full strategy backtest.
+
+State, cursors and deterministic pages persist under `research/webull/`.
+`coverage.json` reports gaps and per-series status. Permission errors stop a
+series without buying a subscription; 429 errors wait at least five minutes.
+A 512 MB raw-bar storage cap stops further collection rather than filling
+the VPS disk. Current-ticker coverage has survivorship bias and cannot certify
+historical universe completeness.
+
+Bounded read-only collection with an explicit symbol:
+
+```bash
+.venv/bin/python -m god_help_tradebot.webull_history --symbols AAPL --timespan M5
+.venv/bin/python -m god_help_tradebot.webull_history --symbols AAPL --timespan D
+```
+
+Repeat after the cooldown to resume the saved cursor. `--retry-blocked` retries
+blocked series after access problems have been resolved; it does not subscribe
+to data. Existing sandbox App Key/Secret and OpenAPI market-data entitlements
+are required. App market-data subscriptions are not necessarily OpenAPI access.
+Never paste raw SDK logs or credentials when sharing collection results.
+
+A fully verified dataset can now declare `coverage_mode: maximum_available`,
+`available_window_verified: true`, and exact `available_start`/`available_end`
+dates in its research manifest. This allows a shorter verified history with
+at least 90 trading dates. It does NOT lower the approved training, validation,
+holdout or paired shadow trade-count gates. Historical signal, executable-quote,
+borrow and universe requirements still apply. The raw Webull bar collector does
+not manufacture those missing inputs, so bars alone cannot trigger promotion.
+
+Official reference: https://developer.webull.com/apis/docs/reference/historical-bars
+
 ## What you need
 
 - A small VPS (Ubuntu 22.04+). ~$4–6/month from DigitalOcean, Linode/Akamai,

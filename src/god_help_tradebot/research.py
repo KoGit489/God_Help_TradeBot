@@ -86,8 +86,21 @@ def audit_dataset(directory: Path, now: datetime, config: BotConfig) -> tuple[di
     if not steps:
         reasons.append("no historical timeline")
     days = sorted({datetime.fromisoformat(step["time"]).date() for step in steps})
-    if len(days) < 1000 or not days or days[0] > now.date().replace(year=now.year - 5) or days[-1] < (now - timedelta(days=7)).date():
-        reasons.append("five-year trading-day coverage unavailable")
+    maximum_available = manifest.get("coverage_mode") == "maximum_available"
+    coverage_sufficient = False
+    if maximum_available:
+        coverage_sufficient = (len(days) >= 90 and manifest.get("available_window_verified") is True
+                               and manifest.get("available_start") == str(days[0])
+                               and manifest.get("available_end") == str(days[-1])
+                               and days[-1] >= (now - timedelta(days=7)).date())
+        if not coverage_sufficient:
+            reasons.append("maximum-available window is unverified or has fewer than 90 trading dates")
+    else:
+        import calendar
+        cutoff = now.date().replace(year=now.year - 5, day=min(now.day, calendar.monthrange(now.year - 5, now.month)[1]))
+        coverage_sufficient = bool(len(days) >= 1000 and days[0] <= cutoff and days[-1] >= (now - timedelta(days=7)).date())
+        if not coverage_sufficient:
+            reasons.append("five-year trading-day coverage unavailable")
     universe = manifest.get("universe", [])
     symbols = {item.get("symbol") for item in universe if isinstance(item, dict)}
     by_symbol = {item["symbol"]: item for item in universe if isinstance(item, dict) and item.get("symbol")}
@@ -140,6 +153,7 @@ def audit_dataset(directory: Path, now: datetime, config: BotConfig) -> tuple[di
             "source": manifest.get("source"), "first_day": str(days[0]) if days else None,
             "last_day": str(days[-1]) if days else None, "trading_days": len(days), "symbols": len(symbols),
             "signal_observations": signal_counts, "executable_quotes": executable_quotes,
+            "coverage_mode": "maximum_available" if maximum_available else "five_years", "coverage_sufficient": coverage_sufficient,
             "fingerprint": fingerprint.hexdigest()}, steps
 
 
@@ -326,7 +340,9 @@ def valid_promotion(promotion: Any) -> bool:
         if not isinstance(promotion, dict) or promotion["policy"] != POLICY or not valid_parameters(promotion["parameters"]) or not valid_parameters(promotion["previous"]):
             return False
         evidence = promotion["evidence"]
-        if evidence["audit"]["ready"] is not True or evidence["audit"]["trading_days"] < 1000:
+        audit = evidence["audit"]
+        minimum_days = 90 if audit.get("coverage_mode") == "maximum_available" else 1000
+        if audit["ready"] is not True or audit["trading_days"] < minimum_days or audit.get("coverage_sufficient", minimum_days == 1000) is not True:
             return False
         expected = hashlib.sha256(json.dumps(promotion["parameters"], sort_keys=True).encode() + evidence["audit"]["fingerprint"].encode()).hexdigest()[:16]
         if promotion["version"] != expected or not acceptable(**promotion["training"], minimum=MINIMUMS["training"]):

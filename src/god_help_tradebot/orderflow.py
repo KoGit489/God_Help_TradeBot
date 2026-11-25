@@ -34,7 +34,7 @@ def orderflow_score(broker: Any, symbol: str, now: datetime | None = None) -> fl
     now = now or datetime.now(EASTERN)
     try:
         response = broker.session.data_client.market_data.get_tick(
-            symbol, US_STOCK_CATEGORY, count="200", trading_sessions=["PRE", "RTH", "POST", "OVN"],
+            symbol, US_STOCK_CATEGORY, count="200", trading_sessions=["PRE", "RTH", "ATH", "OVN"],
         )
         if response.status_code != 200:
             if response.status_code == 429:
@@ -68,7 +68,7 @@ def full_day_extremes(broker: Any, symbol: str, day: date) -> tuple[Decimal, Dec
     end = start + timedelta(days=1)
     response = broker.session.data_client.market_data.get_batch_history_bar(
         [symbol], US_STOCK_CATEGORY, "m5", count="1200", real_time_required=True,
-        trading_sessions=["PRE", "RTH", "POST", "OVN"],
+        trading_sessions=["PRE", "RTH", "ATH", "OVN"],
         start_time=int(start.timestamp() * 1000), end_time=int(end.timestamp() * 1000) - 1,
     )
     if response.status_code != 200:
