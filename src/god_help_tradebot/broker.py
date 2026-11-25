@@ -544,7 +544,7 @@ class WebullSandboxBroker:
         if self.session is None or session == "CLOSED":
             return None
         response = self.session.data_client.market_data.get_quotes(
-            ticker, US_STOCK_CATEGORY, depth=1, overnight_required=session == "OVERNIGHT",
+            ticker, US_STOCK_CATEGORY, depth=1, overnight_required=session == "NIGHT",
         )
         if response.status_code != 200:
             raise RuntimeError(f"Webull quote request failed; HTTP Status: {response.status_code}")

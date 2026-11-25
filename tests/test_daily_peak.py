@@ -13,20 +13,32 @@ from god_help_tradebot.orderflow import orderflow_score, full_day_extremes
 
 
 @pytest.mark.parametrize("timestamp, expected", [
-    ("2026-11-24T00:00", "OVERNIGHT"),
+    ("2026-11-24T00:00", "NIGHT"),
     ("2026-11-24T04:00", "ALL"),
     ("2026-11-24T09:30", "CORE"),
     ("2026-11-24T16:00", "ALL"),
-    ("2026-11-24T20:00", "OVERNIGHT"),
-    ("2026-11-24T23:59", "OVERNIGHT"),
+    ("2026-11-24T20:00", "NIGHT"),
+    ("2026-11-24T23:59", "NIGHT"),
     ("2026-11-27T12:59", "CORE"),
     ("2026-11-27T13:00", "ALL"),
     ("2026-11-27T20:00", "CLOSED"),
     ("2026-11-28T00:00", "CLOSED"),
-    ("2026-11-29T20:00", "OVERNIGHT"),
+    ("2026-11-29T20:00", "NIGHT"),
 ])
 def test_full_day_session_boundaries(timestamp, expected):
     assert equity_order_session(datetime.fromisoformat(timestamp).replace(tzinfo=EASTERN)) == expected
+
+
+@pytest.mark.parametrize("timestamp", ["2026-11-24T00:00", "2026-11-24T20:00", "2026-11-24T23:59", "2026-11-29T20:00"])
+def test_scheduler_overnight_session_builds_valid_broker_limit_payload(timestamp):
+    from god_help_tradebot.broker import WebullSandboxBroker
+
+    session = equity_order_session(datetime.fromisoformat(timestamp).replace(tzinfo=EASTERN))
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    payload = broker._build_order_payload("TEST", OrderSide.BUY, 1, OrderType.LIMIT,
+                                          limit_price=100, trading_session=session)
+    assert payload["support_trading_session"] == "NIGHT"
+    assert payload["order_type"] == "LIMIT"
 
 
 def _now():
@@ -174,7 +186,7 @@ def test_overnight_quotes_require_matching_symbol_and_fresh_timestamp(monkeypatc
     from god_help_tradebot.broker import WebullSandboxBroker
     import god_help_tradebot.schedule as schedule
 
-    monkeypatch.setattr(schedule, "equity_order_session", lambda now: "OVERNIGHT")
+    monkeypatch.setattr(schedule, "equity_order_session", lambda now: "NIGHT")
     payload = {"basic": {"symbol": "TEST", "timestamp": datetime.now(EASTERN).isoformat()},
                "bids": [{"price": "99", "size": "10"}], "asks": [{"price": "100", "size": "20"}]}
     calls = []
@@ -189,6 +201,24 @@ def test_overnight_quotes_require_matching_symbol_and_fresh_timestamp(monkeypatc
     payload["basic"]["timestamp"] = datetime.now(EASTERN).isoformat()
     payload["basic"]["symbol"] = "OTHER"
     assert broker._get_session_quote("TEST") is None
+
+
+def test_night_discovery_uses_overnight_quote_fields(monkeypatch):
+    from god_help_tradebot.autoscreen import enrich_with_quotes
+    from god_help_tradebot.screen import MarketSnapshot
+    import god_help_tradebot.schedule as schedule
+
+    monkeypatch.setattr(schedule, "equity_order_session", lambda now: "NIGHT")
+    quote = Quote("TEST", Decimal("104"), Decimal("106"), Decimal("100"),
+                  overnight_price=Decimal("105"), overnight_change_ratio=Decimal("5"),
+                  overnight_volume=Decimal("123"), extended_price=Decimal("99"))
+    broker = SimpleNamespace(daily_peak_mode=True, get_latest_quotes=lambda symbols: {"TEST": quote})
+    snapshot = MarketSnapshot(symbol="TEST", price=100, change_percent=1, volume=1000,
+                              average_volume=1000, bid=99, ask=101, day_low=90, day_high=110)
+    enriched, = enrich_with_quotes(broker, [snapshot])
+    assert enriched.price == 105
+    assert enriched.change_percent == 5
+    assert enriched.volume == 123
 
 
 def test_limit_chase_never_duplicates_cancel_raced_fill(monkeypatch):

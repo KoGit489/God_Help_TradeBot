@@ -188,11 +188,11 @@ def enrich_with_quotes(
             from datetime import datetime
             from .schedule import EASTERN, equity_order_session
             session = equity_order_session(datetime.now(EASTERN))
-            price = quote.overnight_price if session == "OVERNIGHT" else quote.extended_price if session == "ALL" else quote.last
+            price = quote.overnight_price if session == "NIGHT" else quote.extended_price if session == "ALL" else quote.last
             if price is None or not price.is_finite() or price <= 0:
                 continue
-            change = quote.overnight_change_ratio if session == "OVERNIGHT" else quote.extended_change_ratio if session == "ALL" else None
-            volume = quote.overnight_volume if session == "OVERNIGHT" else quote.extended_volume if session == "ALL" else None
+            change = quote.overnight_change_ratio if session == "NIGHT" else quote.extended_change_ratio if session == "ALL" else None
+            volume = quote.overnight_volume if session == "NIGHT" else quote.extended_volume if session == "ALL" else None
             session_fields = {"price": float(price), "day_high": max(snapshot.day_high, float(price)),
                               "day_low": min(snapshot.day_low, float(price))}
             if change is not None and change.is_finite():

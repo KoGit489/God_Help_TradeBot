@@ -18,9 +18,9 @@ def equity_order_session(now: datetime) -> str:
         if time(4) <= now.time() < time(20):
             return "ALL"
         if now.time() < time(4):
-            return "OVERNIGHT"
+            return "NIGHT"
     if now.time() >= time(20) and get_trading_session(now.date() + timedelta(days=1)) is not None:
-        return "OVERNIGHT"
+        return "NIGHT"
     return "CLOSED"
 
 
