@@ -41,6 +41,79 @@ def test_scheduler_overnight_session_builds_valid_broker_limit_payload(timestamp
     assert payload["order_type"] == "LIMIT"
 
 
+def test_allocation_quantity_caps_orders_and_buys_exact_remainder():
+    from god_help_tradebot.risk import allocation_quantity
+
+    assert allocation_quantity(Decimal("500000"), Decimal("1"), Decimal("490000")) == 199999
+    assert allocation_quantity(Decimal("2000"), Decimal("1"), Decimal("1245")) == 1245
+    assert allocation_quantity(Decimal("2000"), Decimal("3"), Decimal("2.99")) == 0
+    with pytest.raises(ValueError):
+        allocation_quantity(Decimal("NaN"), Decimal("1"), Decimal("100"))
+
+
+def test_full_allocation_submits_two_caps_then_exact_remainder(tmp_path):
+    from god_help_tradebot.screen import MarketSnapshot, RankedCandidate, ProfiledCandidate
+
+    target = Decimal(199999 * 2 + 1245)
+    broker = PaperBroker(target / Decimal("0.98"))
+    broker.get_buying_power = lambda: broker.cash
+    quote = Quote("TEST", Decimal("1"), Decimal("1"), Decimal("1"))
+    broker.last_quotes["TEST"] = quote
+    ledger = EquityPerformanceStore(tmp_path / "ledger.json", "account")
+    config = BotConfig(daily_peak_mode=True, account_price_priority=True, full_account_allocation=True)
+    loop = MonitorLoop(broker, config, now_provider=_now, performance_store=ledger, allow_entries=True,
+                       snapshot_provider=lambda: [])
+    snapshot = MarketSnapshot("TEST", 1, 2, 100000, 100000, 1, 1, 1, 1)
+    summary = LoopSummary()
+    loop._enter((ProfiledCandidate(RankedCandidate(snapshot, 0.9), "momentum"), False), summary)
+    assert summary.entries[0].quantity == 199999
+    loop.run_once(summary)
+    assert len(summary.entries) == 1
+    broker.process_quote(quote)
+    loop.run_once(summary)
+    assert [order.quantity for order in summary.entries] == [199999, 199999]
+    broker.process_quote(quote)
+    loop.run_once(summary)
+    assert [order.quantity for order in summary.entries] == [199999, 199999, 1245]
+    broker.process_quote(quote)
+    loop.run_once(summary)
+    assert ledger.data["allocation"] is None
+    assert ledger.data["active"]["TEST"]["entry_quantity"] == int(target)
+    assert ledger.data["trades"] == []
+    assert loop._entry_fills["TEST"] == Decimal("1")
+    assert loop.exit_plans["TEST"].quantity == int(target)
+    loop._now = lambda: datetime(2026, 11, 24, 23, 59, tzinfo=EASTERN)
+    for _ in range(4):
+        loop.run_once(summary)
+        broker.process_quote(quote)
+    loop.run_once(summary)
+    assert [order.quantity for order in summary.exits] == [199999, 199999, 1245]
+    assert len(ledger.data["trades"]) == 1
+    assert ledger.data["trades"][0]["entry_quantity"] == int(target)
+    assert not ledger.data["active"]
+
+
+def test_allocation_resumes_after_priced_fill_without_tracked_order(tmp_path):
+    from god_help_tradebot.screen import MarketSnapshot, RankedCandidate, ProfiledCandidate
+
+    broker = PaperBroker(500000)
+    broker.get_buying_power = lambda: broker.cash
+    quote = Quote("TEST", Decimal("1"), Decimal("1"), Decimal("1"))
+    broker.last_quotes["TEST"] = quote
+    ledger = EquityPerformanceStore(tmp_path / "ledger.json", "account")
+    config = BotConfig(daily_peak_mode=True, account_price_priority=True, full_account_allocation=True)
+    loop = MonitorLoop(broker, config, now_provider=_now, performance_store=ledger, allow_entries=True)
+    snapshot = MarketSnapshot("TEST", 1, 2, 100000, 100000, 1, 1, 1, 1)
+    summary = LoopSummary()
+    loop._enter((ProfiledCandidate(RankedCandidate(snapshot, 0.9), "momentum"), False), summary)
+    broker.process_quote(quote)
+    loop._log_fills(summary)
+    restored = MonitorLoop(broker, config, now_provider=_now, performance_store=EquityPerformanceStore(ledger.path, "account"),
+                           allow_entries=True, snapshot_provider=lambda: [])
+    restored.run_once(summary)
+    assert [order.quantity for order in summary.entries] == [199999, 199999]
+
+
 def _now():
     return datetime(2026, 11, 24, 11, tzinfo=EASTERN)
 
@@ -293,6 +366,9 @@ def test_cli_enables_daily_mode_for_server_but_not_replays(monkeypatch):
     monkeypatch.setattr(cli, "run_bot", lambda **kwargs: calls.append(kwargs))
     assert cli.main(["--max-polls", "1"]) == 0
     assert calls[0]["config"].daily_peak_mode
+    assert calls[0]["config"].highest_score_priority
+    assert calls[0]["config"].full_account_allocation
+    assert calls[0]["config"].research_enabled
 
 
 def test_corrupt_daily_review_state_blocks_startup(tmp_path):

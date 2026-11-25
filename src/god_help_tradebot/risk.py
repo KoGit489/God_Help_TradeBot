@@ -9,6 +9,13 @@ MARKET_ORDER_HEADROOM = Decimal("0.98")
 MAX_ORDER_QUANTITY = 199_999
 
 
+def allocation_quantity(buying_power: Decimal, price: Decimal, remaining_budget: Decimal) -> int:
+    if any(not value.is_finite() for value in (buying_power, price, remaining_budget)) or price <= 0:
+        raise ValueError("allocation requires finite buying power, budget and a positive price")
+    budget = max(Decimal("0"), min(remaining_budget, buying_power * MARKET_ORDER_HEADROOM))
+    return min(MAX_ORDER_QUANTITY, int(budget / price))
+
+
 @dataclass(frozen=True)
 class TradePlan:
     entry_price: Decimal
@@ -33,14 +40,14 @@ def build_trade_plan(
     if not config.account_price_priority and entry > Decimal(str(config.max_symbol_price)):
         raise ValueError("entry price exceeds the configured symbol price limit")
 
-    if config.account_price_priority and (account_value is None or not Decimal(str(account_value)).is_finite() or account_value <= 0):
+    if (config.account_price_priority or config.full_account_allocation) and (account_value is None or not Decimal(str(account_value)).is_finite() or account_value <= 0):
         raise ValueError("current buying power is required for account price priority")
-    if config.account_price_priority or (config.position_pct_of_account > 0 and account_value is not None):
+    if config.account_price_priority or config.full_account_allocation or (config.position_pct_of_account > 0 and account_value is not None):
         # Account-percentage mode: deploy that fraction of the account; the stop
         # distance defines the dollar risk, and the bracket caps the downside.
         max_value = (
             Decimal(str(account_value))
-            * Decimal("1" if config.account_price_priority else str(config.position_pct_of_account))
+            * Decimal("1" if config.account_price_priority or config.full_account_allocation else str(config.position_pct_of_account))
             * MARKET_ORDER_HEADROOM
         )
         quantity = int((max_value / entry).to_integral_value(rounding=ROUND_DOWN))
@@ -81,12 +88,12 @@ def build_short_plan(
     if not config.account_price_priority and entry > Decimal(str(config.max_symbol_price)):
         raise ValueError("entry price exceeds the configured symbol price limit")
 
-    if config.account_price_priority and (account_value is None or not Decimal(str(account_value)).is_finite() or account_value <= 0):
+    if (config.account_price_priority or config.full_account_allocation) and (account_value is None or not Decimal(str(account_value)).is_finite() or account_value <= 0):
         raise ValueError("current buying power is required for account price priority")
-    if config.account_price_priority or (config.position_pct_of_account > 0 and account_value is not None):
+    if config.account_price_priority or config.full_account_allocation or (config.position_pct_of_account > 0 and account_value is not None):
         max_value = (
             Decimal(str(account_value))
-            * Decimal("1" if config.account_price_priority else str(config.position_pct_of_account))
+            * Decimal("1" if config.account_price_priority or config.full_account_allocation else str(config.position_pct_of_account))
             * MARKET_ORDER_HEADROOM
         )
         quantity = int((max_value / entry).to_integral_value(rounding=ROUND_DOWN))

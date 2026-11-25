@@ -112,6 +112,8 @@ class MonitorLoop:
         self.allow_shorts = self.config.allow_shorts if allow_shorts is None else allow_shorts
         self.recorder = recorder
         self.performance_store = performance_store
+        if self.config.full_account_allocation and performance_store is None:
+            raise ValueError("full-account allocation requires a persistent execution ledger")
         self._base_config = self.config
         self._base_confirmation_score = min_confirmation_score
         self._events_client: Any | None = None
@@ -314,6 +316,8 @@ class MonitorLoop:
 
         if self.flatten_before_close:
             self._maybe_flatten(positions, summary)
+        if self.config.full_account_allocation:
+            self._maybe_allocate(positions, summary)
 
         if not self._startup_positions_checked:
             self._startup_positions_checked = True
@@ -576,6 +580,7 @@ class MonitorLoop:
             return
         order, quantity = self._submit_exit_order(symbol, side, abs(position.quantity), order_type,
                                                  summary, trading_session=session, limit_price=limit_price)
+        self._stop_allocation(summary, "confirmed reversal exit submitted")
         self._track_exit(symbol, order, side, quantity)
         summary.exits.append(order)
         summary.events.append(LoopEvent("peak_exit_order", symbol,
@@ -624,7 +629,8 @@ class MonitorLoop:
                 raise ValueError("short covers require a verified supported session; deferred to CORE")
             if limit_price is None:
                 order_type, limit_price = self._execution_terms(symbol, side, trading_session)
-        requested = quantity
+        from .risk import MAX_ORDER_QUANTITY
+        requested = min(quantity, MAX_ORDER_QUANTITY) if self.config.full_account_allocation else quantity
         while requested > 0:
             try:
                 order = self.broker.submit_order(
@@ -667,6 +673,7 @@ class MonitorLoop:
         """Close all open positions at the end-of-day cutoff (no overnight holds)."""
         at_cutoff = self._at_flatten_time()
         if at_cutoff:
+            self._stop_allocation(summary, "daily liquidation deadline")
             for symbol, position in positions.items():
                 if position.quantity == 0:
                     continue
@@ -782,7 +789,100 @@ class MonitorLoop:
                 summary.events.append(LoopEvent(f"{review['strategy']}_peak_review", "account",
                                                f"{review['wins']}/5 peak exits; target=4/5; tightening={review['tightening_level']}/4"))
 
+    def _stop_allocation(self, summary: LoopSummary, reason: str) -> None:
+        allocation = self.performance_store.data.get("allocation") if self.performance_store else None
+        if allocation is not None:
+            self.performance_store.data["allocation"] = None
+            self.performance_store.save()
+            summary.events.append(LoopEvent("allocation_stopped", allocation["symbol"], reason))
+
+    def _begin_allocation(self, order: PaperOrder, fallback: bool, account_value: float | None) -> None:
+        if not self.config.full_account_allocation:
+            return
+        from .risk import MARKET_ORDER_HEADROOM
+
+        self.performance_store.data["allocation"] = {
+            "symbol": order.symbol, "side": order.side.value, "fallback": fallback,
+            "budget": str(Decimal(str(account_value)) * MARKET_ORDER_HEADROOM),
+            "key": self.performance_store.key(order), "quantity": order.quantity,
+            "started_at": self._now().isoformat(),
+        }
+        self.performance_store.save()
+
+    def _maybe_allocate(self, positions: dict[str, Position], summary: LoopSummary) -> None:
+        allocation = self.performance_store.data.get("allocation")
+        if allocation is None:
+            return
+        symbol = allocation["symbol"]
+        plan = self.exit_plans.get(symbol)
+        if self.performance_store.data["paused"] or not self.allow_entries or self._at_flatten_time() or symbol in self._pending_exits or (plan and plan.liquidation_requested):
+            self._stop_allocation(summary, "exit, deadline, observation mode or reconciliation pause takes precedence")
+            return
+        if self.performance_store.data["orders"] or self._pending_limit is not None:
+            return
+        checkpoint = self.performance_store.data["fills"].get(allocation["key"])
+        if checkpoint is None or checkpoint["quantity"] != allocation["quantity"]:
+            self._stop_allocation(summary, "previous chunk did not complete with priced fills")
+            return
+        trade = self.performance_store.data["active"].get(symbol)
+        position = positions.get(symbol)
+        if trade is None or trade["exit_quantity"]:
+            self._stop_allocation(summary, "trade is closing or no longer active")
+            return
+        if position is None or abs(position.quantity) != trade["entry_quantity"]:
+            return
+        if any(other != symbol and held.quantity for other, held in positions.items()):
+            self._stop_allocation(summary, "another position exists")
+            return
+        side = OrderSide(allocation["side"])
+        if not self._market_open() or (side is OrderSide.SHORT and not self._core_session_open()):
+            return
+        if not self._spread_ok_at_entry(symbol, summary):
+            return
+        direction = "short" if side is OrderSide.SHORT else "long"
+        if allocation["fallback"]:
+            if self.config.paradox_fallback and not self._paradox_tape_ok(symbol, direction, summary):
+                self._stop_allocation(summary, "fallback tape guard rejected further allocation")
+                return
+        elif not self._entry_gates_pass(symbol, direction, summary):
+            self._stop_allocation(summary, "entry tape guard rejected further allocation")
+            return
+        account_value = self._account_value()
+        quote = self._entry_quote
+        if account_value is None or quote is None:
+            return
+        order_type, limit_price = self._execution_terms(symbol, side, self._exit_trading_session())
+        price = Decimal(str(limit_price)) if limit_price is not None else quote.bid if side is OrderSide.SHORT else quote.ask
+        from .risk import allocation_quantity
+
+        remaining = Decimal(allocation["budget"]) - Decimal(trade["entry_notional"])
+        quantity = allocation_quantity(Decimal(str(account_value)), price, remaining)
+        if quantity < 1:
+            self._stop_allocation(summary, f"deployable remainder ${max(Decimal('0'), remaining)} cannot fund another whole share")
+            return
+        try:
+            order = self.broker.submit_order(symbol, side, quantity, order_type,
+                                             trading_session=self._exit_trading_session(),
+                                             **({"limit_price": limit_price} if limit_price is not None else {}))
+        except Exception as error:
+            if self._is_deterministic_rejection(error):
+                self._stop_allocation(summary, f"platform rejected next chunk: {_error_summary(error)}")
+                return
+            raise
+        self._entry_order_ids.add(order.order_id)
+        self.performance_store.track_order(order, "ENTRY", fallback=allocation["fallback"])
+        allocation["key"] = self.performance_store.key(order)
+        allocation["quantity"] = quantity
+        self.performance_store.save()
+        self._pending_entry = symbol
+        self._pending_limit = {"order_id": order.order_id, "symbol": symbol, "side": side,
+                               "quantity": quantity, "polls": 0}
+        summary.entries.append(order)
+        summary.events.append(LoopEvent("allocation_chunk", symbol, f"submitted {quantity}; wait for priced fills before next chunk"))
+
     def _maybe_enter(self, summary: LoopSummary) -> None:
+        if self.performance_store is not None and self.performance_store.data.get("allocation") is not None:
+            return
         if self.performance_store is not None and self.performance_store.data["paused"]:
             summary.events.append(LoopEvent("trade_review_paused", "account", self.performance_store.data.get("pause_reason", "performance reconciliation required")))
             return
@@ -791,7 +891,7 @@ class MonitorLoop:
             return
         if not self._market_open() or self._in_entry_cooldown():
             return
-        if self.config.account_price_priority:
+        if self.config.account_price_priority or self.config.full_account_allocation:
             buying_power = self._account_value()
             if buying_power is None or not Decimal(str(buying_power)).is_finite() or buying_power <= 0:
                 summary.events.append(LoopEvent("sizing_blocked", "account", "current buying power unavailable or zero; no candidate scan"))
@@ -873,7 +973,7 @@ class MonitorLoop:
         """
         awaiting_confirmation = False
         self._selection_budget = None
-        if self.config.account_price_priority:
+        if self.config.account_price_priority or self.config.full_account_allocation:
             from .risk import MARKET_ORDER_HEADROOM
 
             buying_power = self._account_value()
@@ -891,7 +991,7 @@ class MonitorLoop:
             symbol = profiled.candidate.snapshot.symbol
             if self.config.daily_peak_mode and not self._core_session_open() and profiled.profile in ("fade", "loser"):
                 continue
-            if self.config.account_price_priority:
+            if self.config.account_price_priority or self.config.full_account_allocation:
                 direction = "short" if profiled.profile in ("fade", "loser") else "long"
                 if not self._spread_ok_at_entry(symbol, summary) or not self._entry_gates_pass(symbol, direction, summary):
                     continue
@@ -998,6 +1098,9 @@ class MonitorLoop:
             if level:
                 combined = [item for item in combined if item.profile != "momentum"
                             or abs(item.candidate.snapshot.change_percent) <= max(2, self.config.momentum_max_change_percent - 2 * level)]
+        if self.config.highest_score_priority:
+            combined.sort(key=lambda item: (-item.candidate.score, priority.get(item.profile, 9), item.candidate.snapshot.symbol))
+            return combined
         combined.sort(key=lambda item: (priority.get(item.profile, 9), -item.candidate.score))
         if self.config.account_price_priority:
             combined.sort(key=lambda item: (-item.candidate.snapshot.price, -item.candidate.score, priority.get(item.profile, 9)))
@@ -1132,6 +1235,7 @@ class MonitorLoop:
 
     def _track_exit(self, symbol: str, order: Any, side: OrderSide, quantity: int) -> None:
         """Register an in-flight exit order: one per symbol, fill-verified."""
+        self._stop_allocation(LoopSummary(), "exit submitted")
         self._exit_order_ids.add(order.order_id)
         if self.performance_store is not None:
             self.performance_store.track_order(order, "EXIT")
@@ -1292,6 +1396,9 @@ class MonitorLoop:
     def _on_entry_filled(self, order: Any, summary: LoopSummary) -> None:
         """Record the entry fill and re-anchor the bracket to the true price."""
         fill = order.fill_price
+        trade = self.performance_store.data["active"].get(order.symbol) if self.performance_store else None
+        if trade is not None:
+            fill = Decimal(trade["entry_notional"]) / trade["entry_quantity"]
         self._entry_fills[order.symbol] = fill
         plan = self.exit_plans.get(order.symbol)
         if plan is None and self.performance_store is not None:
@@ -1308,7 +1415,7 @@ class MonitorLoop:
                 stop = fill * (Decimal("1") - stop_pct)
             self.exit_plans[order.symbol] = ExitPlan(
                 symbol=order.symbol,
-                quantity=plan.quantity,
+                quantity=trade["entry_quantity"] - trade["exit_quantity"] if trade is not None else plan.quantity,
                 target_price=target,
                 stop_price=stop,
                 direction=plan.direction,
@@ -1321,7 +1428,7 @@ class MonitorLoop:
             )
             self._persist_plans()
         summary.events.append(
-            LoopEvent("entry_filled", order.symbol, f"filled {getattr(order, 'filled_quantity', 0) or order.quantity} @ {fill}; bracket anchored to fill")
+            LoopEvent("entry_filled", order.symbol, f"filled {getattr(order, 'filled_quantity', 0) or order.quantity} @ {order.fill_price}; aggregate entry average {fill}")
         )
 
     def _on_exit_filled(self, order: Any, summary: LoopSummary) -> None:
@@ -1466,6 +1573,11 @@ class MonitorLoop:
         self._entry_order_ids.add(replacement.order_id)
         if self.performance_store:
             self.performance_store.track_order(replacement, "ENTRY", fallback=fallback, chase_anchor=anchor)
+            allocation = self.performance_store.data.get("allocation")
+            if allocation is not None and allocation["symbol"] == order.symbol:
+                allocation["key"] = self.performance_store.key(replacement)
+                allocation["quantity"] = replacement.quantity
+                self.performance_store.save()
         self._pending_entry = order.symbol
         self._pending_limit = {"order_id": replacement.order_id, "symbol": order.symbol, "side": order.side,
                                "quantity": quantity, "polls": 0, "anchor": anchor}
@@ -1522,12 +1634,13 @@ class MonitorLoop:
             return
         # Fixed-percentage bracket: works at the open before a day's range exists.
         entry = Decimal(str(snapshot.price))
-        if self.config.account_price_priority:
+        if self.config.account_price_priority or self.config.full_account_allocation:
             entry = self._entry_quote.ask if self._entry_quote is not None else Decimal(str(snapshot.ask))
         stop_price = entry * (Decimal("1") - Decimal(str(self.config.stop_pct)))
+        account_value = self._account_value()
         try:
             plan = build_trade_plan(
-                float(entry), float(stop_price), self.config, account_value=self._account_value()
+            float(entry), float(stop_price), self.config, account_value=account_value
             )
         except ValueError:
             if self.config.account_price_priority:
@@ -1536,8 +1649,9 @@ class MonitorLoop:
         try:
             order_type, limit_price = self._execution_terms(snapshot.symbol, OrderSide.BUY, self._exit_trading_session())
             if limit_price is not None:
+                account_value = self._account_value()
                 plan = build_trade_plan(limit_price, limit_price * (1 - self.config.stop_pct),
-                                        self.config, account_value=self._account_value())
+                                        self.config, account_value=account_value)
             order = self.broker.submit_order(
                 snapshot.symbol, OrderSide.BUY, plan.quantity, order_type,
                 trading_session=self._exit_trading_session(),
@@ -1563,6 +1677,7 @@ class MonitorLoop:
         self._entry_order_ids.add(order.order_id)
         if self.performance_store is not None:
             self.performance_store.track_order(order, "ENTRY", fallback=is_fallback)
+            self._begin_allocation(order, is_fallback, account_value)
         self._pending_limit = {
             "order_id": order.order_id, "symbol": snapshot.symbol,
             "side": OrderSide.BUY, "quantity": plan.quantity, "polls": 0,
@@ -1598,12 +1713,13 @@ class MonitorLoop:
             return
         # Fixed-percentage bracket: stop 10% above entry, target 30% below.
         entry = Decimal(str(snapshot.price))
-        if self.config.account_price_priority:
+        if self.config.account_price_priority or self.config.full_account_allocation:
             entry = self._entry_quote.bid if self._entry_quote is not None else Decimal(str(snapshot.bid))
         stop_price = entry * (Decimal("1") + Decimal(str(self.config.stop_pct)))
+        account_value = self._account_value()
         try:
             plan = build_short_plan(
-                float(entry), float(stop_price), self.config, account_value=self._account_value()
+            float(entry), float(stop_price), self.config, account_value=account_value
             )
         except ValueError:
             if self.config.account_price_priority:
@@ -1627,6 +1743,7 @@ class MonitorLoop:
         self._entry_order_ids.add(order.order_id)
         if self.performance_store is not None:
             self.performance_store.track_order(order, "ENTRY", fallback=is_fallback)
+            self._begin_allocation(order, is_fallback, account_value)
         self._pending_limit = {
             "order_id": order.order_id, "symbol": snapshot.symbol,
             "side": OrderSide.SHORT, "quantity": plan.quantity, "polls": 0,
@@ -1669,6 +1786,7 @@ class MonitorLoop:
         if quote is None or quote.last <= 0:
             return True  # no fresh quote — don't block on missing information
         self._entry_quote = quote
+        self._record_quotes([quote])
         spread_pct = ((quote.ask - quote.bid) / quote.last) * 100
         if spread_pct > self.config.max_spread_percent:
             summary.events.append(
@@ -1762,14 +1880,21 @@ class MonitorLoop:
         """Run confirmation, supplying the shared market backdrop when available."""
         if (self.confirmation in (confirm_candidate, None)) and isinstance(self.broker, WebullSandboxBroker):
             confirm = confirm_candidate if direction == "bullish" else confirm_candidate_bearish
-            return confirm(
+            report = confirm(
                 self.broker,
                 symbol,
                 min_score=self.min_confirmation_score,
                 market_news=self._market_news_report(),
                 include_orderflow=self.config.daily_peak_mode,
             )
-        return self.confirmation(symbol)
+        else:
+            report = self.confirmation(symbol)
+        if self.recorder is not None:
+            try:
+                self.recorder.record_confirmation(self._now(), symbol, direction, report)
+            except (OSError, TypeError, ValueError):
+                pass
+        return report
 
     def _market_news_report(self) -> Any | None:
         """Fetch the broad market backdrop once per loop run and reuse it."""

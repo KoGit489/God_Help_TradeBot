@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         for trade in result.trades:
             print(f"  {trade.symbol} {trade.side} x{trade.quantity}: {trade.entry_price} -> {trade.exit_price} = ${trade.pnl:,.2f}")
         return 0
-    config = replace(config, daily_peak_mode=True)
+    config = replace(config, daily_peak_mode=True, highest_score_priority=True, full_account_allocation=True, research_enabled=True)
     run_bot(
         config=config,
         poll_seconds=args.poll_seconds,

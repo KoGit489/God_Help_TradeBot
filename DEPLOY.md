@@ -79,6 +79,124 @@ The legacy review sections below describe direct callers with peak mode
 disabled. The calendar-day workflow replaces their bracket, close-time,
 fallback win-review, and 30%-session behaviors in the server command.
 
+## Score-First Allocation and Research
+
+The installed command enables `highest_score_priority`, `full_account_allocation`,
+and `research_enabled` alongside peak mode. Main candidates are sorted by their
+screening scores rather than price or profile priority. Affordability, quote,
+confirmation, and tape checks still apply. The inverse fallback keeps targeting
+the weakest eligible read; its strategy is unchanged.
+
+Full allocation means all deployable buying power AFTER the profit reserve and
+required headroom, not literally every account cent. The ledger persists one
+allocation campaign per selected ticker. It sends at most 199,999 shares per
+order, waits for priced fills and matching broker positions, refreshes buying
+power, and submits the next capped chunk or the exact affordable whole-share
+remainder. It cannot spend fractional-share dust or the required reserve.
+Partial canceled/unpriced fills, exits, deadlines and reconciliation pauses
+stop or suspend further allocation. Each liquidation order is also capped;
+all chunks remain one ledger trade until matched exits and flatness.
+
+### Approved Research Policy
+
+Research runs hourly in a separate low-priority process, with API credentials
+excluded from its environment. It can only use `ResearchBroker` and isolated
+simulation ledgers. It cannot place account orders or purchase data. The active
+paper bot keeps managing its orders; research failures do not halt it.
+
+The approved, fixed policy permits ONLY:
+
+- `max_limit_slippage_percent`: 0.1 through 0.5 percent.
+- `entry_chase_polls`: 1 through 4 polls.
+- `exit_chase_polls`: 1 through 4 polls.
+
+Training requires at least 100 completed trades. The frozen candidate must pass
+three chronological validation windows, each with at least 50 completed trades,
+then an untouched holdout with at least 30, then at least 30 paired forward
+shadow trades from observations AFTER candidate selection. Net P&L must be
+positive and improve after modeled costs; drawdown and loss severity must not
+worsen. The holdout also faces wider spreads/slippage, partial/rejected fills,
+outages and unavailable borrow. Missing data/depth and unfinished exposure are
+not treated as successful fills or forced completed trades.
+
+Corporate actions can be supplied as timestamped split/dividend events. Splits
+involving fractional quantities or pending orders block the run rather than
+invent reconciliation. Borrow/transaction costs are explicit models, not proof
+of actual execution. Win rates and incomplete exposure are reported; a 4/5
+batch alone never qualifies a refinement for promotion.
+
+Policy, dataset fingerprint, stage checkpoints, reports and candidate settings
+persist under `research/`. A candidate freezes its dataset through holdout and
+shadow validation. Subsequent generations require a new dataset identity and
+holdout data later than the previously tested period. Core strategy changes
+invalidate prior execution evidence rather than bypass the gates.
+
+Automatic promotion is applied only when the account is flat with no tracked,
+pending, allocation or remote working orders and no reconciliation pause. It
+changes only the three permitted settings and persists its prior settings in
+the account ledger. After 30 closed post-promotion trades, negative P&L after
+modeled per-share fees or worse closed-trade drawdown than the shadow baseline
+triggers persistent rollback. A rolled-back version cannot immediately return.
+Rollback waits for flatness and does not alter management of an open position.
+
+### Historical Data Is Required
+
+The pipeline does NOT claim that five years of full-session data are currently
+available. Without them it reports `blocked_data` and does not promote anything.
+Supply licensed, point-in-time JSON/JSONL datasets under `research/history/`.
+No external download or paid subscription is performed automatically.
+
+The manifest must list dataset-local files and provenance:
+
+```json
+{
+  "dataset_id": "unique-immutable-dataset-id",
+  "source": "licensed point-in-time vendor/export",
+  "point_in_time": true,
+  "includes_delisted": true,
+  "corporate_actions_complete": true,
+  "files": ["history.jsonl"],
+  "universe": [
+    {"symbol": "EXAMPLE", "listed_at": "2010-01-01", "delisted_at": "2025-01-01"}
+  ]
+}
+```
+
+Each step has an aware `time`, candidate `snapshots`, executable bid/ask `quotes`
+with `bid_volume` and `ask_volume`, and per-symbol `confirmations` keyed by
+`bullish`/`bearish`. Confirmation records need explicit `asof`, `score`, `passed`,
+`signals_present`, and the observed capital-flow, analyst, news, pattern and
+orderflow fields. Unknown signal groups remain absent. Optional `shortable`
+maps, `halted` symbols and `corporate_actions` describe verified historical
+constraints. Price-only data are insufficient to certify this entire strategy.
+
+Audit requires five-year coverage, at least 1,000 distinct trading dates, recent
+data, listing intervals including delisted securities, and observed signal and
+quote-depth data. The bounded in-memory dataset limit is 128 MB; larger datasets
+need a partitioned/streaming provider before use. Forward recorder files alone
+are not a five-year historical universe. On a 1 GB VPS, large research should
+run on a separate machine using the same isolated artifacts. POSIX workers
+also cap their address space at 384 MB; larger jobs fail closed rather than
+claiming successful validation. A worker killed externally may leave its
+lock file; verify no research process is running before removing that lock.
+
+Read-only audit of supplied data (writes only isolated research reports):
+
+```bash
+.venv/bin/python -m god_help_tradebot.research --root research --data data --audit
+```
+
+Run one isolated research cycle:
+
+```bash
+.venv/bin/python -m god_help_tradebot.research --root research --data data
+```
+
+Check `research/report.json`, `research/worker.log`, and the app's
+`research_promotion`, `research_promotion_blocked`, and `research_rollback`
+events. Keep the execution ledger and research artifacts backed up. Validation
+and paper fills do not guarantee real-market profitability.
+
 ## What you need
 
 - A small VPS (Ubuntu 22.04+). ~$4–6/month from DigitalOcean, Linode/Akamai,

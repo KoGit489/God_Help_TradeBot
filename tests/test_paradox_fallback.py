@@ -51,6 +51,18 @@ def _bearish_fallback() -> MarketSnapshot:
     return _snapshot("BUMR", 4.00, change_percent=-6.0, relative_volume=1.5, day_low=3.90, day_high=4.30)
 
 
+def test_highest_score_priority_overrides_price_and_profile_priority(monkeypatch):
+    import god_help_tradebot.monitor as monitor
+    from god_help_tradebot.screen import RankedCandidate
+
+    low = _snapshot("LOW", 4, 6, 3, 3.9, 4.3)
+    high = _snapshot("HIGH", 300, 6, 3, 290, 310)
+    monkeypatch.setattr(monitor, "screen_candidates", lambda *args: [RankedCandidate(low, 0.9)])
+    monkeypatch.setattr(monitor, "screen_prepop_candidates", lambda *args: [RankedCandidate(high, 0.5)])
+    loop = MonitorLoop(PaperBroker(1000), BotConfig(account_price_priority=True, highest_score_priority=True))
+    assert loop._ranked_profiles([low, high])[0].candidate.snapshot.symbol == "LOW"
+
+
 def test_price_priority_selects_highest_affordable_qualified_stock(monkeypatch):
     from god_help_tradebot.monitor import LoopSummary
 

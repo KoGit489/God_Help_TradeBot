@@ -80,6 +80,15 @@ class SessionRecorder:
             "ask_volume": str(quote.ask_volume) if quote.ask_volume is not None else None,
         }
 
+    def record_confirmation(self, when: datetime, symbol: str, direction: str, report: Any) -> None:
+        fields = ("score", "passed", "signals_present", "large_flow_ratio", "analyst_buy_ratio", "net_capital_flow",
+                  "news_score", "news_article_count", "pattern_score", "pattern_name", "orderflow_score")
+        observed = {name: getattr(report, name) for name in fields if hasattr(report, name)}
+        observed["asof"] = when.isoformat()
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        with self._path_for(when).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"time": when.isoformat(), "confirmations": {symbol: {direction: observed}}}, allow_nan=False) + "\n")
+
 
 def load_recorded_day(path: str | Path) -> list[dict[str, Any]]:
     """Load a recorded day file (JSONL, one step per line) into a backtest timeline."""

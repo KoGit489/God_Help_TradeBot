@@ -9,6 +9,9 @@ class BotConfig:
     min_symbol_price: float = 1.0
     max_symbol_price: float = 20.0
     account_price_priority: bool = False
+    highest_score_priority: bool = False
+    full_account_allocation: bool = False
+    research_enabled: bool = False
     risk_per_trade_usd: float = 25.0
     reward_multiple: float = 3.0
     max_position_value_usd: float = 500.0

@@ -132,6 +132,16 @@ def run_bot(
                     performance_store.data["profit_reserve_usd"])
 
     stop_requested = {"flag": False}
+    research_worker = None
+    execution_controller = None
+    if config.research_enabled:
+        from .research import ExecutionController, ResearchWorker
+        if performance_store is None:
+            raise ValueError("research promotion requires the account-bound performance ledger")
+        root = Path(state_file).resolve().parent / "research"
+        research_worker = ResearchWorker(root, Path(data_dir).resolve())
+        execution_controller = ExecutionController(root)
+        execution_controller.restore(loop)
 
     if config.account_price_priority:
         buying_power = loop._account_value()
@@ -159,6 +169,12 @@ def run_bot(
             if stop_requested["flag"] or (stop_flag and stop_flag()):
                 logger.info("stopping after %s polls", summary.polls)
                 break
+            if execution_controller is not None:
+                try:
+                    execution_controller.tick(loop, summary)
+                    research_worker.tick(loop._base_config)
+                except Exception as error:
+                    logger.warning("[research_wait] %s: research error; account execution continues", type(error).__name__)
             loop.run_once(summary)
             seen_events = _log_events(logger, summary, seen_events, review_loggers)
             if performance_store is not None and max_polls is None and len(summary.events) > 1000:
@@ -177,6 +193,8 @@ def run_bot(
             interval = min(poll_seconds, 5.0) if config.daily_peak_mode and (loop.exit_plans or loop._pending_limit) else poll_seconds
             time.sleep(loop.error_backoff_seconds if backoff else interval)
     finally:
+        if research_worker is not None:
+            research_worker.close()
         for sig, handler in previous_handlers.items():
             try:
                 signal.signal(sig, handler)

@@ -17,6 +17,9 @@ DEFAULT_CONFIG_FILE = Path("bot_config.json")
 
 # Keys in the JSON file that map onto BotConfig fields.
 _TUNABLES = {
+    "highest_score_priority": lambda value: value if isinstance(value, bool) else str(value).strip().lower() in ("1", "true", "yes", "on"),
+    "full_account_allocation": lambda value: value if isinstance(value, bool) else str(value).strip().lower() in ("1", "true", "yes", "on"),
+    "research_enabled": lambda value: value if isinstance(value, bool) else str(value).strip().lower() in ("1", "true", "yes", "on"),
     "trade_review_enabled": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "account_price_priority": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "min_symbol_price": float,

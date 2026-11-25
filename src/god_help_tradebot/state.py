@@ -96,6 +96,8 @@ class EquityPerformanceStore:
             "reviewed_count": 0, "paused": False, "take_profit_sessions": {},
             "fallback_reviews": [],
             "profit_reserve_usd": "0.00", "review_archives": [], "daily_reviews": None,
+            "allocation": None,
+            "execution_refinements": {"active": None, "history": [], "rejected": []},
         }
         if self.path.exists():
             try:
@@ -109,6 +111,33 @@ class EquityPerformanceStore:
                     if not isinstance(loaded.get(key), dict):
                         raise ValueError("invalid ledger")
                 self.data.update(loaded)
+                refinements = self.data["execution_refinements"]
+                if not isinstance(refinements, dict) or not isinstance(refinements.get("history"), list) or not isinstance(refinements.get("rejected"), list):
+                    raise ValueError("invalid execution refinement history")
+                active_refinement = refinements.get("active")
+                if active_refinement is not None:
+                    bounds = {"max_limit_slippage_percent": (0.1, 0.5), "entry_chase_polls": (1, 4), "exit_chase_polls": (1, 4)}
+                    for group in ("parameters", "previous"):
+                        values = active_refinement[group]
+                        if not isinstance(values, dict) or set(values) != set(bounds) or any(
+                            type(value) not in (int, float) or not Decimal(str(value)).is_finite()
+                            or not bounds[key][0] <= value <= bounds[key][1] for key, value in values.items()
+                        ):
+                            raise ValueError("execution refinement exceeds approved bounds")
+                    if type(active_refinement["through_trade"]) is not int or not 0 <= active_refinement["through_trade"] <= len(loaded["trades"]):
+                        raise ValueError("invalid refinement observation offset")
+                    drawdown = Decimal(str(active_refinement["baseline_drawdown"]))
+                    if not drawdown.is_finite() or not 0 <= drawdown <= 1:
+                        raise ValueError("invalid rollback threshold")
+                allocation = self.data["allocation"]
+                if allocation is not None:
+                    if not isinstance(allocation, dict) or allocation.get("side") not in ("BUY", "SHORT") or not allocation.get("symbol") or not allocation.get("key"):
+                        raise ValueError("invalid allocation")
+                    if type(allocation.get("quantity")) is not int or not 1 <= allocation["quantity"] <= 199_999:
+                        raise ValueError("invalid allocation quantity")
+                    budget = Decimal(str(allocation["budget"]))
+                    if not budget.is_finite() or budget <= 0:
+                        raise ValueError("invalid allocation budget")
                 sessions = self.data["take_profit_sessions"]
                 if not isinstance(sessions, dict) or any(
                     datetime.fromisoformat(day).date().isoformat() != day
