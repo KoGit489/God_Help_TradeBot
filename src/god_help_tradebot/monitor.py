@@ -11,7 +11,7 @@ import dataclasses
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Callable
 
 from .broker import BrokerAdapter, WebullSandboxBroker, is_rate_limit_error, webull_error_code
@@ -19,7 +19,7 @@ from .config import BotConfig
 from .confirm import confirm_candidate, confirm_candidate_bearish
 from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
 from .risk import TradePlan, build_short_plan, build_trade_plan
-from .schedule import TradingSession, get_trading_session
+from .schedule import EASTERN, TradingSession, equity_order_session, get_trading_session
 from .screen import (
     MarketSnapshot,
     ProfiledCandidate,
@@ -42,6 +42,11 @@ class ExitPlan:
     stop_price: Decimal
     direction: str = "long"
     liquidation_requested: bool = False
+    favorable_extreme: Decimal | None = None
+    last_sample_price: Decimal | None = None
+    last_sample_time: str | None = None
+    reversal_samples: int = 0
+    opened_day: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,11 +159,18 @@ class MonitorLoop:
         self._discovery_cache: list[MarketSnapshot] = []
         self._discovery_at: float | None = None
         self._discovery_offset = 0
+        self._peak_review_at: float | None = None
+        self._peak_review_offset = 0
+        self._peak_confirmation_cache: dict[str, tuple[float, Any]] = {}
+        if self.config.daily_peak_mode and isinstance(self.broker, WebullSandboxBroker):
+            self.broker.daily_peak_mode = True
 
         # Restore persisted exit plans so a restart never strands a position.
         if self.state_store is not None and not self.exit_plans:
             self.exit_plans = dict(self.state_store.load())
         if self.performance_store is not None:
+            if self.config.daily_peak_mode:
+                self.performance_store.start_daily_reviews(self._now())
             self.config = self.performance_store.effective_config(self._base_config)
             self.min_confirmation_score = max(self._base_confirmation_score, self.performance_store.data["adaptive"].get("min_confirmation_score", 0))
             for symbol, trade in self.performance_store.data["active"].items():
@@ -166,6 +178,12 @@ class MonitorLoop:
                 remaining = trade["entry_quantity"] - trade["exit_quantity"]
                 if symbol not in self.exit_plans and remaining > 0:
                     self.exit_plans[symbol] = self._fill_exit_plan(symbol, self._entry_fills[symbol], remaining, trade["direction"])
+                    self._persist_plans()
+                if self.config.daily_peak_mode and symbol in self.exit_plans:
+                    from datetime import datetime
+                    self.exit_plans[symbol] = dataclasses.replace(
+                        self.exit_plans[symbol], opened_day=datetime.fromisoformat(trade["opened_at"]).astimezone(EASTERN).date().isoformat(),
+                    )
                     self._persist_plans()
             for client_id, record in self.performance_store.data["orders"].items():
                 order = self.broker.restore_tracked_order(client_id, record)
@@ -177,7 +195,8 @@ class MonitorLoop:
                     self._entry_order_ids.add(order.order_id)
                     self._pending_entry = order.symbol
                     self._pending_limit = {"order_id": order.order_id, "symbol": order.symbol, "side": order.side,
-                                           "quantity": order.quantity, "polls": 0}
+                                           "quantity": order.quantity, "polls": 0,
+                                           "anchor": Decimal(record["chase_anchor"]) if record.get("chase_anchor") else order.limit_price}
                 else:
                     self._exit_order_ids.add(order.order_id)
                     self._pending_exits[order.symbol] = {"order_id": order.order_id, "side": order.side,
@@ -267,7 +286,8 @@ class MonitorLoop:
                     ))
                 else:
                     summary.events.append(LoopEvent("trade_performance_review", "account",
-                                                    f"{review['wins']}/5 winners; target 4/5; tightened={review['changes']}; paused={review['paused']}"))
+                                                    f"{review['wins']}/5 winners; target 4/5; tightened={review['changes']}; paused={review['paused']}; "
+                                                    f"batch P&L={review.get('realized_pnl_usd', 'n/a')}; cumulative P&L={review.get('cumulative_pnl_usd', 'n/a')}"))
             self.config = self.performance_store.effective_config(self._base_config)
             self.min_confirmation_score = max(self._base_confirmation_score, self.performance_store.data["adaptive"].get("min_confirmation_score", 0))
         for symbol in self._filled_exits_pending_reconcile:
@@ -314,7 +334,9 @@ class MonitorLoop:
             self._maybe_enter(summary)
 
         self._persist_plans()
-        if self.performance_store is not None:
+        if self.config.daily_peak_mode and self.performance_store is not None:
+            self._review_daily_peaks(summary)
+        if self.performance_store is not None and not self.config.daily_peak_mode:
             for day, hit, hits, count in self.performance_store.review_take_profit(
                 self._now(), observe=self.allow_entries and not self.performance_store.data["paused"],
             ):
@@ -416,6 +438,9 @@ class MonitorLoop:
             return  # already rejected this session; retry when the session changes
 
         try:
+            if self.config.daily_peak_mode:
+                self._maybe_peak_exit(symbol, position, plan, quote, session, summary)
+                return
             if plan.direction == "short":
                 self._maybe_exit_short(symbol, position, plan, quote, session, summary)
                 return
@@ -488,6 +513,74 @@ class MonitorLoop:
             self._track_exit(symbol, order, OrderSide.BUY, quantity)
             self._exit_blocked.pop(symbol, None)
 
+    def _execution_terms(self, symbol: str, side: OrderSide, session: str) -> tuple[OrderType, float | None]:
+        if session == "CORE" or not self.config.daily_peak_mode:
+            return OrderType.MARKET, None
+        if session == "CLOSED" or side is OrderSide.SHORT:
+            raise ValueError("no supported outside-hours session for this order")
+        quote = self.broker.get_latest_quote(symbol)
+        if quote is None or any(not value.is_finite() or value <= 0 for value in (quote.bid, quote.ask, quote.last)) or quote.ask < quote.bid:
+            raise ValueError("outside-hours order requires a valid executable quote")
+        buffer = Decimal(str(self.config.max_limit_slippage_percent)) / 100
+        price = quote.ask * (1 + buffer) if side is OrderSide.BUY else quote.bid * (1 - buffer)
+        tick = Decimal("0.01") if price >= 1 else Decimal("0.0001")
+        price = price.quantize(tick, rounding=ROUND_CEILING if side is OrderSide.BUY else ROUND_FLOOR)
+        if price <= 0:
+            raise ValueError("invalid marketable limit price")
+        return OrderType.LIMIT, float(price)
+
+    def _maybe_peak_exit(self, symbol: str, position: Position, plan: ExitPlan,
+                         quote: Quote, session: str, summary: LoopSummary) -> None:
+        if position.quantity < 0 and session != "CORE":
+            return
+        now = self._now().astimezone(EASTERN)
+        from datetime import datetime
+
+        if plan.last_sample_time and (now - datetime.fromisoformat(plan.last_sample_time)).total_seconds() < 5:
+            return
+        short = position.quantity < 0
+        price = quote.ask if short else quote.bid
+        if not price.is_finite() or price <= 0 or quote.ask < quote.bid:
+            return
+        previous = plan.last_sample_price or price
+        extreme = plan.favorable_extreme or price
+        extreme = min(extreme, price) if short else max(extreme, price)
+        adverse = price > previous if short else price < previous
+        samples = plan.reversal_samples + 1 if adverse else 0
+        plan = dataclasses.replace(plan, favorable_extreme=extreme, last_sample_price=price,
+                                   last_sample_time=now.isoformat(), reversal_samples=samples,
+                                   opened_day=plan.opened_day or now.date().isoformat())
+        self.exit_plans[symbol] = plan
+        self._persist_plans()
+        entry = self._entry_fills.get(symbol, position.average_price)
+        profit = entry - price if short else price - entry
+        retracement = (price - extreme if short else extreme - price) / extreme * 100
+        trade = self.performance_store.data["active"].get(symbol, {}) if self.performance_store else {}
+        strategy = "fallback" if trade.get("fallback") else "main"
+        level = self.performance_store.peak_tightening_level(strategy) if self.performance_store else 0
+        reversal_threshold = max(0.25, self.config.peak_reversal_percent - 0.15 * level)
+        if profit <= 0 or retracement < reversal_threshold or samples < 2:
+            return
+        clock = time.monotonic()
+        cached = self._peak_confirmation_cache.get(symbol)
+        if cached is None or clock - cached[0] >= 30:
+            report = self._confirm(symbol, "bullish" if short else "bearish") if self.confirmation is not None else None
+            self._peak_confirmation_cache[symbol] = (clock, report)
+        else:
+            report = cached[1]
+        if report is None or not getattr(report, "passed", False) or (getattr(report, "signals_present", 0) or 0) < self.config.min_signals_present:
+            return
+        side = OrderSide.BUY if short else OrderSide.SELL
+        order_type, limit_price = self._execution_terms(symbol, side, session)
+        if limit_price is not None and ((short and Decimal(str(limit_price)) >= entry) or (not short and Decimal(str(limit_price)) <= entry)):
+            return
+        order, quantity = self._submit_exit_order(symbol, side, abs(position.quantity), order_type,
+                                                 summary, trading_session=session, limit_price=limit_price)
+        self._track_exit(symbol, order, side, quantity)
+        summary.exits.append(order)
+        summary.events.append(LoopEvent("peak_exit_order", symbol,
+                                       f"extreme={extreme}; retracement={retracement:.2f}%; opposing signals={report.signals_present}"))
+
     @staticmethod
     def _is_deterministic_rejection(exc: Exception) -> bool:
         """HTTP 417 rejections (session/eligibility/params) won't fix themselves this cycle."""
@@ -523,8 +616,14 @@ class MonitorLoop:
         limit_price: float | None = None,
     ) -> tuple[Any, int]:
         """Retry a quantity-risk rejection with a smaller, managed exit order."""
-        if order_type is not OrderType.MARKET or trading_session != "CORE":
+        if not self.config.daily_peak_mode and (order_type is not OrderType.MARKET or trading_session != "CORE"):
             raise ValueError("monitor exits must be CORE market orders")
+        if self.config.daily_peak_mode:
+            trading_session = self._exit_trading_session()
+            if side is OrderSide.BUY and position_is_short(self.broker, symbol) and trading_session != "CORE":
+                raise ValueError("short covers require a verified supported session; deferred to CORE")
+            if limit_price is None:
+                order_type, limit_price = self._execution_terms(symbol, side, trading_session)
         requested = quantity
         while requested > 0:
             try:
@@ -553,9 +652,13 @@ class MonitorLoop:
 
     def _can_trade_now(self) -> bool:
         """Market-only execution is available during regular hours."""
+        if self.config.daily_peak_mode:
+            return self._exit_trading_session() != "CLOSED"
         return self._core_session_open()
 
     def _exit_trading_session(self) -> str:
+        if self.config.daily_peak_mode:
+            return equity_order_session(self._now())
         if self._core_session_open():
             return "CORE"
         return "CLOSED"
@@ -575,6 +678,7 @@ class MonitorLoop:
                     )
                 elif not plan.liquidation_requested:
                     self.exit_plans[symbol] = dataclasses.replace(plan, liquidation_requested=True)
+            self._persist_plans()
         if not at_cutoff and not any(plan.liquidation_requested for plan in self.exit_plans.values()):
             return
         session = self._exit_trading_session()
@@ -596,13 +700,21 @@ class MonitorLoop:
                 continue  # deterministic rejection: retry only when the session changes
             # Longs sell to flatten; shorts buy to cover.
             side = OrderSide.SELL if position.quantity > 0 else OrderSide.BUY
+            if self.config.daily_peak_mode and position.quantity < 0 and session != "CORE":
+                continue
             quantity = abs(position.quantity)
             try:
                 order, submitted_quantity = self._submit_exit_order(
                     symbol, side, quantity, OrderType.MARKET, summary,
                     trading_session="CORE",
                 )
-                detail = f"market-exit {submitted_quantity} before close"
+                detail = (f"deadline-exit {submitted_quantity}; session={session}; type={order.order_type.value}"
+                          if self.config.daily_peak_mode else f"market-exit {submitted_quantity} before close")
+            except ValueError as exc:
+                if not self.config.daily_peak_mode:
+                    raise
+                summary.events.append(LoopEvent("exit_quote_wait", symbol, str(exc)))
+                continue
             except Exception as exc:
                 if self._is_deterministic_rejection(exc):
                     self._exit_blocked[symbol] = session
@@ -618,12 +730,57 @@ class MonitorLoop:
 
     def _at_flatten_time(self) -> bool:
         now = self._now()
+        if self.config.daily_peak_mode:
+            now = now.astimezone(EASTERN)
+            return (now.hour == 23 and now.minute >= 59) or any(
+                plan.opened_day is not None and plan.opened_day < now.date().isoformat()
+                for plan in self.exit_plans.values()
+            )
         session = get_trading_session(now.date())
         return session is not None and now >= session.exit_time
 
     def _persist_plans(self) -> None:
         if self.state_store is not None:
             self.state_store.save(self.exit_plans)
+
+    def _review_daily_peaks(self, summary: LoopSummary) -> None:
+        from .orderflow import full_day_extremes
+        from datetime import datetime
+
+        if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
+            return
+        clock = time.monotonic()
+        if self._peak_review_at is not None and clock - self._peak_review_at < 3600:
+            return
+        self._peak_review_at = clock
+        now = self._now().astimezone(EASTERN)
+        daily = self.performance_store.data["daily_reviews"]
+        if daily is None:
+            return
+        pending = [trade for trade in self.performance_store.data["trades"][daily["trade_offset"]:]
+                   if trade.get("daily_peak") and trade["trade_id"] not in daily["peak_results"]
+                   and datetime.fromisoformat(trade["closed_at"]).astimezone(EASTERN).date() < now.date()]
+        if not pending:
+            return
+        offset = self._peak_review_offset % len(pending)
+        rotated = pending[offset:] + pending[:offset]
+        self._peak_review_offset = (offset + min(4, len(pending))) % len(pending)
+        for trade in rotated[:4]:
+            day = datetime.fromisoformat(trade["closed_at"]).astimezone(EASTERN).date()
+            extrema = full_day_extremes(self.broker, trade["symbol"], day)
+            if extrema is None:
+                summary.events.append(LoopEvent("peak_review_wait", trade["symbol"], "validated full-day bars unavailable; left ungraded"))
+                continue
+            reviews = self.performance_store.grade_peak(trade, now, *extrema, self.config.peak_review_tolerance_percent)
+            if trade["trade_id"] not in daily["peak_results"]:
+                summary.events.append(LoopEvent("peak_review_wait", trade["symbol"], "exit fill outside reported day range; left ungraded"))
+                continue
+            result = daily["peak_results"][trade["trade_id"]]
+            summary.events.append(LoopEvent(f"{result['strategy']}_peak_result", trade["symbol"],
+                                           f"peak={'hit' if result['win'] else 'miss'}; distance={result['distance_percent']}%; high={result['high']}; low={result['low']}"))
+            for review in reviews:
+                summary.events.append(LoopEvent(f"{review['strategy']}_peak_review", "account",
+                                               f"{review['wins']}/5 peak exits; target=4/5; tightening={review['tightening_level']}/4"))
 
     def _maybe_enter(self, summary: LoopSummary) -> None:
         if self.performance_store is not None and self.performance_store.data["paused"]:
@@ -732,6 +889,8 @@ class MonitorLoop:
                          and Decimal(str(snapshot.price)) <= budget]
         for profiled in self._ranked_profiles(snapshots):
             symbol = profiled.candidate.snapshot.symbol
+            if self.config.daily_peak_mode and not self._core_session_open() and profiled.profile in ("fade", "loser"):
+                continue
             if self.config.account_price_priority:
                 direction = "short" if profiled.profile in ("fade", "loser") else "long"
                 if not self._spread_ok_at_entry(symbol, summary) or not self._entry_gates_pass(symbol, direction, summary):
@@ -796,6 +955,8 @@ class MonitorLoop:
 
     def _fallback_window_open(self) -> bool:
         """Fallback entries wait fallback_after_minutes after the open."""
+        if self.config.daily_peak_mode:
+            return self._market_open()
         minutes = self.config.fallback_after_minutes
         if minutes <= 0:
             return True
@@ -832,6 +993,11 @@ class MonitorLoop:
         # Pre-pop leads: a coiling stock is worth more than an already-exploded
         # one. Within each profile, the best score wins.
         priority = {"prepop": 0, "momentum": 1, "fade": 2, "loser": 3, "fallback": 9}
+        if self.config.daily_peak_mode and self.performance_store is not None:
+            level = self.performance_store.peak_tightening_level("main")
+            if level:
+                combined = [item for item in combined if item.profile != "momentum"
+                            or abs(item.candidate.snapshot.change_percent) <= max(2, self.config.momentum_max_change_percent - 2 * level)]
         combined.sort(key=lambda item: (priority.get(item.profile, 9), -item.candidate.score))
         if self.config.account_price_priority:
             combined.sort(key=lambda item: (-item.candidate.snapshot.price, -item.candidate.score, priority.get(item.profile, 9)))
@@ -873,6 +1039,11 @@ class MonitorLoop:
         if self.allow_shorts:
             relaxed_bear = dataclasses.replace(relaxed, min_change_percent=1.0)
             bears = screen_loser_candidates(snapshots, relaxed_bear)
+        if self.config.daily_peak_mode and not self._core_session_open():
+            if self.config.paradox_fallback:
+                bulls = []
+            else:
+                bears = []
 
         # Paradox mode fades the read, so the WEAKEST conviction is the juiciest
         # target (screens sort best-first, so take the tail). With-grain mode
@@ -1002,6 +1173,8 @@ class MonitorLoop:
                     self._flattened.discard(symbol)
                 continue  # FILLED is logged by _log_fills; CANCELED lets exit logic re-fire fresh
             session = self._exit_trading_session()
+            if self.config.daily_peak_mode and position.quantity < 0 and session != "CORE":
+                continue
             if session == "CLOSED":
                 if order is not None and order.status is OrderStatus.OPEN:
                     try:
@@ -1020,6 +1193,19 @@ class MonitorLoop:
                 continue
             side = pending["side"]
             quantity = pending["quantity"]
+            if self.config.daily_peak_mode:
+                plan = self.exit_plans.get(symbol)
+                quote = self.broker.get_latest_quote(symbol)
+                entry = self._entry_fills.get(symbol, position.average_price)
+                price = quote.bid if quote is not None and side is OrderSide.SELL else quote.ask if quote is not None else None
+                forced = (plan is not None and plan.liquidation_requested) or self._at_flatten_time()
+                if price is None:
+                    continue
+                profitable = price > entry if side is OrderSide.SELL else price < entry
+                if not forced and not profitable:
+                    if self._cancel_confirmed(pending["order_id"], symbol, summary):
+                        self._pending_exits.pop(symbol, None)
+                    continue
             if isinstance(self.broker, WebullSandboxBroker):
                 quote = self.broker.get_latest_quote(symbol)
                 depth = None if quote is None else (
@@ -1127,6 +1313,11 @@ class MonitorLoop:
                 stop_price=stop,
                 direction=plan.direction,
                 liquidation_requested=plan.liquidation_requested,
+                favorable_extreme=plan.favorable_extreme,
+                last_sample_price=plan.last_sample_price,
+                last_sample_time=plan.last_sample_time,
+                reversal_samples=plan.reversal_samples,
+                opened_day=plan.opened_day or (self._now().astimezone(EASTERN).date().isoformat() if self.config.daily_peak_mode else None),
             )
             self._persist_plans()
         summary.events.append(
@@ -1206,7 +1397,7 @@ class MonitorLoop:
                     self.exit_plans.pop(pending["symbol"], None)
             return  # FILLED: position management takes over
         symbol = pending["symbol"]
-        if self._at_flatten_time() or not self._core_session_open():
+        if self._at_flatten_time() or not self._can_trade_now():
             if not self._cancel_confirmed(pending["order_id"], symbol, summary):
                 return
             self._pending_limit = None
@@ -1218,9 +1409,68 @@ class MonitorLoop:
                 LoopEvent("entry_canceled", symbol, "unfilled entry canceled outside the entry window; partial position remains managed")
             )
             return
+        if self.config.daily_peak_mode and order.order_type is OrderType.LIMIT:
+            pending["polls"] += 1
+            if pending["polls"] >= max(1, self.config.entry_chase_polls):
+                try:
+                    self._chase_limit_entry(pending, order, summary)
+                except ValueError as exc:
+                    summary.events.append(LoopEvent("entry_quote_wait", symbol, str(exc)))
+            return
         if not pending.get("wait_logged"):
             summary.events.append(LoopEvent("entry_wait", symbol, "market entry pending; no duplicate submitted"))
             pending["wait_logged"] = True
+
+    def _chase_limit_entry(self, pending: dict, order: PaperOrder, summary: LoopSummary) -> None:
+        anchor = pending.get("anchor") or order.limit_price
+        order_type, price = self._execution_terms(order.symbol, order.side, self._exit_trading_session())
+        if price is not None and anchor is not None:
+            ceiling = anchor * (1 + Decimal(str(self.config.max_limit_slippage_percent)) / 100)
+            if Decimal(str(price)) > ceiling:
+                summary.events.append(LoopEvent("entry_chase_limit", order.symbol, "price exceeded original chase cap; no replacement"))
+                if self._cancel_confirmed(order.order_id, order.symbol, summary):
+                    self._pending_limit = None
+                    self._pending_entry = None
+                    self._entry_blocked.add(order.symbol)
+                return
+        record = self.performance_store.data["orders"].get(self.performance_store.key(order), {}) if self.performance_store else {}
+        fallback = record.get("fallback") is True
+        if not self._cancel_confirmed(order.order_id, order.symbol, summary):
+            return
+        self._log_fills(summary)
+        self._pending_limit = None
+        if self.performance_store and self.performance_store.data["paused"]:
+            return
+        quantity = order.quantity - getattr(order, "filled_quantity", 0)
+        quote = self.broker.get_latest_quote(order.symbol)
+        if quote is None:
+            self._pending_entry = None
+            return
+        buying_power = self._account_value()
+        if buying_power is None or buying_power <= 0:
+            self._pending_entry = None
+            return
+        from .risk import MARKET_ORDER_HEADROOM
+        if order_type is OrderType.MARKET and anchor is not None and quote.ask > anchor * (1 + Decimal(str(self.config.max_limit_slippage_percent)) / 100):
+            self._pending_entry = None
+            summary.events.append(LoopEvent("entry_chase_limit", order.symbol, "CORE transition price exceeded chase cap; no market replacement"))
+            return
+        entry_price = Decimal(str(price)) if price is not None else quote.ask
+        quantity = min(quantity, int(Decimal(str(buying_power)) * MARKET_ORDER_HEADROOM / entry_price))
+        if quantity <= 0:
+            self._pending_entry = None
+            return
+        replacement = self.broker.submit_order(order.symbol, order.side, quantity, order_type,
+                                               trading_session=self._exit_trading_session(),
+                                               **({"limit_price": price} if price is not None else {}))
+        self._entry_order_ids.add(replacement.order_id)
+        if self.performance_store:
+            self.performance_store.track_order(replacement, "ENTRY", fallback=fallback, chase_anchor=anchor)
+        self._pending_entry = order.symbol
+        self._pending_limit = {"order_id": replacement.order_id, "symbol": order.symbol, "side": order.side,
+                               "quantity": quantity, "polls": 0, "anchor": anchor}
+        summary.entries.append(replacement)
+        summary.events.append(LoopEvent("entry_chase", order.symbol, f"confirmed cancellation; replaced remaining {quantity} shares"))
 
     def _enter(
         self,
@@ -1249,7 +1499,7 @@ class MonitorLoop:
                         )
                     )
                 return  # shorting not enabled
-            if not self._market_open():
+            if not self._core_session_open():
                 return  # Webull only accepts shorts during regular hours
             if paradox and profiled.profile == "fallback":
                 if not self._paradox_tape_ok(symbol, "short", summary):
@@ -1284,10 +1534,20 @@ class MonitorLoop:
                 summary.events.append(LoopEvent("sizing_blocked", snapshot.symbol, "refreshed buying power cannot support this entry"))
             return
         try:
+            order_type, limit_price = self._execution_terms(snapshot.symbol, OrderSide.BUY, self._exit_trading_session())
+            if limit_price is not None:
+                plan = build_trade_plan(limit_price, limit_price * (1 - self.config.stop_pct),
+                                        self.config, account_value=self._account_value())
             order = self.broker.submit_order(
-                snapshot.symbol, OrderSide.BUY, plan.quantity, OrderType.MARKET,
-                trading_session="CORE",
+                snapshot.symbol, OrderSide.BUY, plan.quantity, order_type,
+                trading_session=self._exit_trading_session(),
+                **({"limit_price": limit_price} if limit_price is not None else {}),
             )
+        except ValueError as exc:
+            if not self.config.daily_peak_mode:
+                raise
+            summary.events.append(LoopEvent("entry_quote_wait", snapshot.symbol, str(exc)))
+            return
         except Exception as exc:
             if self._is_deterministic_rejection(exc):
                 # Platform rejected the entry (buying-power headroom, quantity
@@ -1319,6 +1579,7 @@ class MonitorLoop:
             quantity=plan.quantity,
             target_price=entry * (Decimal("1") + Decimal(str(self.config.target_pct))),
             stop_price=plan.stop_price,
+            opened_day=self._now().astimezone(EASTERN).date().isoformat() if self.config.daily_peak_mode else None,
         )
         if is_fallback:
             summary.events.append(
@@ -1327,6 +1588,8 @@ class MonitorLoop:
 
     def _enter_short(self, profiled: ProfiledCandidate, summary: LoopSummary) -> None:
         """Enter a short on a fade/loser candidate: stop above, target below."""
+        if self.config.daily_peak_mode and not self._core_session_open():
+            return
         snapshot = profiled.candidate.snapshot
         is_fallback = profiled.profile in ("fallback", "fallback_loser")
         if not is_fallback and not self._entry_gates_pass(snapshot.symbol, "short", summary):
@@ -1381,6 +1644,7 @@ class MonitorLoop:
             target_price=entry * (Decimal("1") - Decimal(str(self.config.target_pct))),
             stop_price=plan.stop_price,
             direction="short",
+            opened_day=self._now().astimezone(EASTERN).date().isoformat() if self.config.daily_peak_mode else None,
         )
         if is_fallback:
             summary.events.append(
@@ -1503,6 +1767,7 @@ class MonitorLoop:
                 symbol,
                 min_score=self.min_confirmation_score,
                 market_news=self._market_news_report(),
+                include_orderflow=self.config.daily_peak_mode,
             )
         return self.confirmation(symbol)
 
@@ -1526,7 +1791,12 @@ class MonitorLoop:
             value = getter()
         except Exception:
             return None
-        return float(value) if value is not None else None
+        if value is None:
+            return None
+        value = Decimal(str(value))
+        if self.config.daily_peak_mode and self.performance_store is not None:
+            value = max(Decimal("0"), value - Decimal(self.performance_store.data["profit_reserve_usd"]))
+        return float(value)
 
     def _core_session_open(self) -> bool:
         now = self._now()
@@ -1535,12 +1805,16 @@ class MonitorLoop:
 
     def _market_open(self) -> bool:
         """True during the entry window; new entries stop at the flatten cutoff."""
+        if self.config.daily_peak_mode:
+            return self._can_trade_now() and not self._at_flatten_time()
         now = self._now()
         session = get_trading_session(now.date())
         return session is not None and session.market_open <= now < session.exit_time
 
     def _in_entry_cooldown(self) -> bool:
         """True during the first entry_cooldown_minutes after the open."""
+        if self.config.daily_peak_mode:
+            return False
         if self.config.entry_cooldown_minutes <= 0:
             return False
         now = self._now()
@@ -1552,6 +1826,11 @@ class MonitorLoop:
         return session.market_open <= now < session.market_open + timedelta(
             minutes=self.config.entry_cooldown_minutes
         )
+
+
+def position_is_short(broker: BrokerAdapter, symbol: str) -> bool:
+    position = broker.get_position(symbol)
+    return position is not None and position.quantity < 0
 
 
 def _default_now() -> "datetime":

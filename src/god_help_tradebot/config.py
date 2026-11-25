@@ -67,6 +67,10 @@ class BotConfig:
     study_target_winning_days: int = 4
     study_auto_improve: bool = True
     trade_review_enabled: bool = True
+    daily_peak_mode: bool = False
+    peak_reversal_percent: float = 1.0
+    peak_review_tolerance_percent: float = 1.0
+    max_limit_slippage_percent: float = 0.5
 
     def accepts_price(self, price: float) -> bool:
         return isfinite(price) and price > 0 and (
@@ -74,6 +78,10 @@ class BotConfig:
         )
 
     def __post_init__(self) -> None:
+        for value in (self.peak_reversal_percent, self.peak_review_tolerance_percent,
+                      self.max_limit_slippage_percent):
+            if not isfinite(value) or not 0 < value <= 5:
+                raise ValueError("peak and limit percentages must be finite and within (0, 5]")
         if self.min_symbol_price <= 0:
             raise ValueError("min_symbol_price must be positive")
         if self.max_symbol_price < self.min_symbol_price:
@@ -112,8 +120,8 @@ class BotConfig:
             raise ValueError("stop_pct must be between 0 and 1")
         if not 0.0 < self.target_pct < 1.0:
             raise ValueError("target_pct must be between 0 and 1")
-        if self.min_signals_present < 0 or self.min_signals_present > 4:
-            raise ValueError("min_signals_present must be between 0 and 4")
+        if self.min_signals_present < 0 or self.min_signals_present > 5:
+            raise ValueError("min_signals_present must be between 0 and 5")
         if self.entry_cooldown_minutes < 0:
             raise ValueError("entry_cooldown_minutes cannot be negative")
         if self.study_interval_days < 1:

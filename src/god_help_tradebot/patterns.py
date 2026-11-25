@@ -233,7 +233,8 @@ def bear_pattern_score_for_symbol(
     """Fetch recent bars and run bearish pattern detection (5m default)."""
     try:
         response = broker.session.data_client.market_data.get_history_bar(
-            symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count)
+            symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count),
+            **({"trading_sessions": ["PRE", "RTH", "POST", "OVN"], "real_time_required": True} if getattr(broker, "daily_peak_mode", False) else {}),
         )
         bars = bars_from_response(response.json())
     except Exception:
@@ -251,7 +252,8 @@ def trend_direction(
     """Recent tape direction from 5m bars: 'up', 'down', or None when unknown."""
     try:
         response = broker.session.data_client.market_data.get_history_bar(
-            symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count)
+            symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count),
+            **({"trading_sessions": ["PRE", "RTH", "POST", "OVN"], "real_time_required": True} if getattr(broker, "daily_peak_mode", False) else {}),
         )
         bars = bars_from_response(response.json())
     except Exception:
@@ -278,7 +280,8 @@ def pattern_score_for_symbol(
     """Fetch recent bars for a symbol and run pattern detection (5m default)."""
     try:
         response = broker.session.data_client.market_data.get_history_bar(
-            symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count)
+            symbol.upper(), US_STOCK_CATEGORY, timespan, count=str(bar_count),
+            **({"trading_sessions": ["PRE", "RTH", "POST", "OVN"], "real_time_required": True} if getattr(broker, "daily_peak_mode", False) else {}),
         )
         bars = bars_from_response(response.json())
     except Exception:

@@ -183,6 +183,22 @@ def enrich_with_quotes(
         quote = quotes.get(snapshot.symbol)
         if quote is None or quote.bid <= 0 or quote.ask <= 0:
             continue
+        session_fields = {}
+        if getattr(broker, "daily_peak_mode", False):
+            from datetime import datetime
+            from .schedule import EASTERN, equity_order_session
+            session = equity_order_session(datetime.now(EASTERN))
+            price = quote.overnight_price if session == "OVERNIGHT" else quote.extended_price if session == "ALL" else quote.last
+            if price is None or not price.is_finite() or price <= 0:
+                continue
+            change = quote.overnight_change_ratio if session == "OVERNIGHT" else quote.extended_change_ratio if session == "ALL" else None
+            volume = quote.overnight_volume if session == "OVERNIGHT" else quote.extended_volume if session == "ALL" else None
+            session_fields = {"price": float(price), "day_high": max(snapshot.day_high, float(price)),
+                              "day_low": min(snapshot.day_low, float(price))}
+            if change is not None and change.is_finite():
+                session_fields["change_percent"] = float(change)
+            if volume is not None and volume.is_finite() and volume >= 0:
+                session_fields["volume"] = int(volume)
         enriched.append(replace(
             snapshot,
             bid=float(quote.bid), ask=float(quote.ask),
@@ -192,6 +208,7 @@ def enrich_with_quotes(
             extended_price=float(quote.extended_price) if quote.extended_price is not None else None,
             extended_change_ratio=float(quote.extended_change_ratio) if quote.extended_change_ratio is not None else None,
             extended_volume=float(quote.extended_volume) if quote.extended_volume is not None else None,
+            **session_fields,
         ))
     return enriched
 

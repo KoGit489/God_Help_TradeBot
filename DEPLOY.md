@@ -2,6 +2,83 @@
 
 Runs the bot 24/7 without your home PC. Sandbox-only; live trading stays off.
 
+## Calendar-Day Peak Workflow
+
+The installed `god-help-tradebot` command now enables `daily_peak_mode`.
+Direct library callers retain the legacy brackets unless they explicitly
+enable this mode. Backtests retain their selected configuration.
+
+- The day is midnight through 23:59 America/New_York, including DST.
+  Starting mid-day scans immediately; there is no invented wait for a
+  midnight that has already passed. No new entry is allowed at 23:59.
+- Eligible long stocks can use pre-market, after-hours, and overnight
+  sessions. Weekends, holidays, unavailable sessions, short borrow, and
+  symbol eligibility remain broker restrictions. Short entries/covers
+  remain CORE-only; outside-hours short support is not assumed.
+- Regular-hours orders are market orders. Outside-hours orders are
+  marketable limits with a 0.5% quote buffer and confirmed-cancel chasing,
+  capped at another 0.5% from the original limit. Partial fills, fresh
+  buying power, and recovery IDs are checked before replacements.
+  A fill is never guaranteed; missing/stale quotes block orders.
+- Fixed 30% take-profit and 10% stop-loss execution is disabled in this
+  mode. Their legacy configuration values remain only sizing inputs.
+  Favorable quote extremes persist across restarts. Two adverse samples
+  at least five seconds apart, a 1% retracement, and opposing confirmation
+  signals can request a profitable exit. Signals include classified
+  recent trade-print orderflow when available, not invented orderflow.
+- Ordinary reversal exits are suppressed at an estimated loss. Market
+  slippage, fees, and borrow costs can still produce a realized loss.
+  At 23:59 the deadline OVERRIDES that rule and requests liquidation,
+  including at a loss. Halts or unsupported sessions persist liquidation
+  intent for the next eligible session; flatness is not guaranteed by
+  the deadline. No new position opens until orders and fills reconcile.
+- Quote polling while a position or entry is pending is at most five
+  seconds apart, or the user's faster interval. Opposing confirmation
+  is cached for 30 seconds; discovery remains bounded at 60 seconds.
+  API errors and rate-limit backoff override these intervals.
+- Half the gross realized profit of each newly completed profitable
+  trade is reserved in the ledger. Later losses do not release it.
+  The cumulative reserve is subtracted from broker buying power, floored
+  at zero, BEFORE existing sizing caps, account percentage, 2% headroom,
+  and quantity limits. This is a sizing reserve, not a funds withdrawal.
+
+### Three Fresh Reviews
+
+On the first peak-mode startup, old review decisions, adaptive gates, and
+30%-session results are archived INSIDE the account ledger. Execution
+history, fills, active positions, tracked orders, and reconciliation
+pauses are never deleted. Subsequent starts do not reset the new reviews.
+Back up `equity_performance.json` and `bot_state.json` before deployment.
+Do not erase the ledger or use `git clean` to deploy.
+
+`trade_accuracy.log` records all completed trades and each independent
+batch of five; four positive-gross-P&L trades pass. Misses persistently
+tighten volume, spread, signal quorum, and confirmation gates; a miss
+at all bounds pauses entries, never exit management. Batch and cumulative
+P&L are logged separately; a 4/5 win rate can still lose money.
+
+`main_peak.log` and `fallback_peak.log` record their own after-day grades
+and independent batches of five. A hit means the average exit fill is
+within 1% of the full Eastern day's high (long) or low (short). Grading
+waits until the CLOSED trade's day ends and requires timestamped bars
+covering all eligible five-minute intervals, plus a consistent fill/day
+range. Missing intervals stay ungraded, even for illiquid stocks; logs
+report the wait. Full-session data permissions must be verified on the
+VPS before relying on these scores. Review requests are bounded hourly.
+
+Each missed main/fallback peak batch raises its separate level up to four.
+Both reduce the reversal threshold by 0.15 percentage points per level
+to react sooner. Main levels also reduce the late-momentum change ceiling
+by two percentage points; fallback levels increase relative volume by
+0.25 and reduce the screening spread cap by 0.5 points per level. Passing
+batches retain prior levels. Durable histories have no time-based expiry;
+these are bounded heuristics, not proven accuracy improvements or promises
+of finding tomorrow's exact extrema. Keep backups through upgrades.
+
+The legacy review sections below describe direct callers with peak mode
+disabled. The calendar-day workflow replaces their bracket, close-time,
+fallback win-review, and 30%-session behaviors in the server command.
+
 ## What you need
 
 - A small VPS (Ubuntu 22.04+). ~$4–6/month from DigitalOcean, Linode/Akamai,

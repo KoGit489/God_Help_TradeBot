@@ -31,6 +31,7 @@ class ConfirmationReport:
     pattern_name: str | None = None
     signals_present: int | None = None
     passed: bool = False
+    orderflow_score: float | None = None
 
 
 def _float(value: Any) -> float:
@@ -130,6 +131,7 @@ def confirm_candidate(
     market_news: MarketNewsReport | None = None,
     pattern_provider: Callable[[str], PatternReport] | None = None,
     include_patterns: bool = True,
+    include_orderflow: bool = False,
 ) -> ConfirmationReport:
     """Combine flow, analyst, news, and market-backdrop signals into a pass/fail.
 
@@ -138,6 +140,8 @@ def confirm_candidate(
     """
     flow_score, large_ratio, net_flow = capital_flow_score(broker, symbol)
     rating_score, buy_ratio = analyst_rating_score(broker, symbol)
+    from .orderflow import orderflow_score
+    tape_flow = orderflow_score(broker, symbol) if include_orderflow else None
 
     news_score: float | None = None
     news_articles = 0
@@ -185,6 +189,7 @@ def confirm_candidate(
         (rating_score, 0.20),
         (news_score, 0.20),
         (pattern_score, 0.15),
+        (tape_flow, 0.25),
     ]
     present = [(value, weight) for value, weight in weighted if value is not None]
     total_weight = sum(weight for _, weight in present)
@@ -196,6 +201,7 @@ def confirm_candidate(
         + (1 if buy_ratio is not None else 0)
         + (1 if news_articles > 0 else 0)
         + (1 if pattern_score is not None else 0)
+        + (1 if tape_flow is not None else 0)
     )
 
     return ConfirmationReport(
@@ -212,6 +218,7 @@ def confirm_candidate(
         pattern_name=pattern_name,
         signals_present=signals_present,
         passed=score >= threshold,
+        orderflow_score=tape_flow,
     )
 
 
@@ -241,6 +248,7 @@ def confirm_candidate_bearish(
     market_news: MarketNewsReport | None = None,
     pattern_provider: Callable[[str], PatternReport] | None = None,
     include_patterns: bool = True,
+    include_orderflow: bool = False,
 ) -> ConfirmationReport:
     """Bearish mirror of confirm_candidate: every signal read in reverse.
 
@@ -250,6 +258,9 @@ def confirm_candidate_bearish(
     """
     flow_score, large_ratio, net_flow = _bear_flow_score(broker, symbol)
     rating_score, buy_ratio = _bear_rating_score(broker, symbol)
+    from .orderflow import orderflow_score
+    bullish_flow = orderflow_score(broker, symbol) if include_orderflow else None
+    tape_flow = 1 - bullish_flow if bullish_flow is not None else None
 
     news_score: float | None = None
     news_articles = 0
@@ -296,6 +307,7 @@ def confirm_candidate_bearish(
         (rating_score, 0.20),
         (news_score, 0.20),
         (pattern_score, 0.15),
+        (tape_flow, 0.25),
     ]
     present = [(value, weight) for value, weight in weighted if value is not None]
     total_weight = sum(weight for _, weight in present)
@@ -306,6 +318,7 @@ def confirm_candidate_bearish(
         + (1 if buy_ratio is not None else 0)
         + (1 if news_articles > 0 else 0)
         + (1 if pattern_score is not None else 0)
+        + (1 if tape_flow is not None else 0)
     )
 
     return ConfirmationReport(
@@ -322,6 +335,7 @@ def confirm_candidate_bearish(
         pattern_name=pattern_name,
         signals_present=signals_present,
         passed=score >= threshold,
+        orderflow_score=tape_flow,
     )
 
 

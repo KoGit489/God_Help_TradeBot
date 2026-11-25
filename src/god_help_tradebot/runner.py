@@ -39,10 +39,18 @@ def _setup_logging(log_file: str | Path = LOG_FILE) -> logging.Logger:
     return logger
 
 
-def _log_events(logger: logging.Logger, summary: LoopSummary, seen: int) -> int:
+def _log_events(logger: logging.Logger, summary: LoopSummary, seen: int,
+                review_loggers: dict[str, logging.Logger] | None = None) -> int:
     """Log new events since the last cycle; returns the new count."""
     for event in summary.events[seen:]:
         logger.info("[%s] %s: %s", event.kind, event.symbol, event.detail)
+        if review_loggers:
+            channel = "all" if event.kind in ("trade_completed", "trade_performance_review") else (
+                "main" if event.kind.startswith("main_peak_") else
+                "fallback" if event.kind.startswith("fallback_peak_") else None
+            )
+            if channel:
+                review_loggers[channel].info("[%s] %s: %s", event.kind, event.symbol, event.detail)
     return len(summary.events)
 
 
@@ -84,6 +92,23 @@ def run_bot(
         broker.assert_no_remote_open_orders(allowed_client_order_ids=performance_store.recovery_ids)
     else:
         broker.assert_no_remote_open_orders()
+    if config.daily_peak_mode and performance_store is None:
+        raise RuntimeError("daily peak mode requires the persistent execution and review ledger")
+    review_loggers = {}
+    if config.daily_peak_mode:
+        for channel, filename in (("all", "trade_accuracy.log"), ("main", "main_peak.log"), ("fallback", "fallback_peak.log")):
+            review_logger = logging.getLogger(f"god_help_tradebot.review.{channel}")
+            review_logger.setLevel(logging.INFO)
+            review_logger.propagate = False
+            for handler in list(review_logger.handlers):
+                handler.close()
+                review_logger.removeHandler(handler)
+            handler = RotatingFileHandler(Path(log_file).parent / filename, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            review_logger.addHandler(handler)
+            review_loggers[channel] = review_logger
+        logger.warning("[daily_peak_mode] sandbox only; no fixed TP/SL; deadline 23:59 Eastern overrides losses; "
+                       "unsupported sessions defer exits; exact peaks and fills are not guaranteed")
 
     loop = MonitorLoop(
         broker,
@@ -98,6 +123,13 @@ def run_bot(
         poll_seconds=poll_seconds,
         max_polls=max_polls,
     )
+    if config.daily_peak_mode:
+        daily = performance_store.data["daily_reviews"]
+        logger.info("[daily_reviews_ready] epoch=%s new_completed=%s main_graded=%s fallback_graded=%s reserve=$%s",
+                    daily["started_at"], len(performance_store.data["trades"]) - daily["trade_offset"],
+                    sum(result["strategy"] == "main" for result in daily["peak_results"].values()),
+                    sum(result["strategy"] == "fallback" for result in daily["peak_results"].values()),
+                    performance_store.data["profit_reserve_usd"])
 
     stop_requested = {"flag": False}
 
@@ -128,7 +160,7 @@ def run_bot(
                 logger.info("stopping after %s polls", summary.polls)
                 break
             loop.run_once(summary)
-            seen_events = _log_events(logger, summary, seen_events)
+            seen_events = _log_events(logger, summary, seen_events, review_loggers)
             if performance_store is not None and max_polls is None and len(summary.events) > 1000:
                 del summary.events[:-1000]
                 seen_events = len(summary.events)
@@ -142,7 +174,8 @@ def run_bot(
             import time
 
             backoff = loop._consecutive_errors or getattr(loop, "_rate_limit_backoff_active", False)
-            time.sleep(loop.error_backoff_seconds if backoff else poll_seconds)
+            interval = min(poll_seconds, 5.0) if config.daily_peak_mode and (loop.exit_plans or loop._pending_limit) else poll_seconds
+            time.sleep(loop.error_backoff_seconds if backoff else interval)
     finally:
         for sig, handler in previous_handlers.items():
             try:

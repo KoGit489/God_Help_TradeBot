@@ -522,6 +522,8 @@ class WebullSandboxBroker:
 
     def get_latest_quote(self, symbol: str) -> Quote | None:
         ticker = symbol.upper()
+        if getattr(self, "daily_peak_mode", False):
+            return self._get_session_quote(ticker)
         if self.session is None:
             return self._quote_cache.get(ticker)
         response = self.session.data_client.market_data.get_snapshot(ticker, US_STOCK_CATEGORY)
@@ -532,12 +534,53 @@ class WebullSandboxBroker:
         self._quote_cache[quote.symbol] = quote
         return quote
 
+    def _get_session_quote(self, ticker: str) -> Quote | None:
+        from datetime import datetime
+        from .orderflow import market_time
+        from .schedule import EASTERN, equity_order_session
+
+        now = datetime.now(EASTERN)
+        session = equity_order_session(now)
+        if self.session is None or session == "CLOSED":
+            return None
+        response = self.session.data_client.market_data.get_quotes(
+            ticker, US_STOCK_CATEGORY, depth=1, overnight_required=session == "OVERNIGHT",
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Webull quote request failed; HTTP Status: {response.status_code}")
+        payload = response.json()
+        if isinstance(payload, dict) and isinstance(payload.get("data"), (dict, list)):
+            payload = payload["data"]
+        if isinstance(payload, list):
+            payload = payload[0] if payload else {}
+        if not isinstance(payload, dict):
+            return None
+        basic = payload.get("basic", {})
+        if not isinstance(basic, dict):
+            return None
+        if str(payload.get("symbol") or basic.get("symbol") or "").upper() != ticker:
+            return None
+        timestamp = market_time(payload.get("time") or payload.get("timestamp") or basic.get("timestamp"))
+        if timestamp is None or not 0 <= (now - timestamp).total_seconds() <= 30:
+            return None
+        bids = payload.get("bids", [])
+        asks = payload.get("asks", [])
+        if not bids or not asks or not isinstance(bids[0], dict) or not isinstance(asks[0], dict):
+            return None
+        bid = _decimal_field(bids[0], "price")
+        ask = _decimal_field(asks[0], "price")
+        if not bid.is_finite() or not ask.is_finite() or not 0 < bid <= ask:
+            return None
+        return Quote(ticker, bid, ask, (bid + ask) / 2,
+                     bid_volume=_decimal_field(bids[0], "size"), ask_volume=_decimal_field(asks[0], "size"))
+
     def get_latest_quotes(self, symbols: list[str]) -> dict[str, Quote]:
         """Fetch snapshots for many symbols in one batched request (max 100 per call)."""
         tickers = list(dict.fromkeys(s.upper() for s in symbols if s and s.strip()))
         if not tickers or self.session is None:
             return {}
-        response = self.session.data_client.market_data.get_snapshot(tickers, US_STOCK_CATEGORY)
+        options = {"extend_hour_required": True, "overnight_required": True} if getattr(self, "daily_peak_mode", False) else {}
+        response = self.session.data_client.market_data.get_snapshot(tickers, US_STOCK_CATEGORY, **options)
         quotes: dict[str, Quote] = {}
         for record in _payload_records(response):
             try:
@@ -686,7 +729,9 @@ class WebullSandboxBroker:
 
     def restore_tracked_order(self, client_order_id: str, record: dict[str, Any]) -> PaperOrder:
         order = PaperOrder(self._next_order_id, record["symbol"], OrderSide(record["side"]),
-                           record["quantity"], OrderType.MARKET, client_order_id=client_order_id)
+                           record["quantity"], OrderType(record.get("order_type", "MARKET")),
+                           limit_price=Decimal(record["limit_price"]) if record.get("limit_price") else None,
+                           client_order_id=client_order_id)
         self._orders[order.order_id] = order
         self._next_order_id += 1
         return order

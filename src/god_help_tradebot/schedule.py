@@ -9,6 +9,21 @@ from zoneinfo import ZoneInfo
 EASTERN = ZoneInfo("America/New_York")
 
 
+def equity_order_session(now: datetime) -> str:
+    now = now.astimezone(EASTERN)
+    today = get_trading_session(now.date())
+    if today is not None:
+        if today.market_open <= now < today.market_close:
+            return "CORE"
+        if time(4) <= now.time() < time(20):
+            return "ALL"
+        if now.time() < time(4):
+            return "OVERNIGHT"
+    if now.time() >= time(20) and get_trading_session(now.date() + timedelta(days=1)) is not None:
+        return "OVERNIGHT"
+    return "CLOSED"
+
+
 @dataclass(frozen=True)
 class TradingSession:
     session_date: date

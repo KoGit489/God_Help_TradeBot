@@ -49,6 +49,11 @@ class StateStore:
                     "short" if Decimal(str(record["target_price"])) < Decimal(str(record["stop_price"])) else "long",
                 ),
                 liquidation_requested=bool(record.get("liquidation_requested", False)),
+                favorable_extreme=Decimal(record["favorable_extreme"]) if record.get("favorable_extreme") else None,
+                last_sample_price=Decimal(record["last_sample_price"]) if record.get("last_sample_price") else None,
+                last_sample_time=record.get("last_sample_time"),
+                reversal_samples=int(record.get("reversal_samples", 0)),
+                opened_day=record.get("opened_day"),
             )
             for symbol, record in plans.items()
             if isinstance(record, dict)
@@ -63,6 +68,11 @@ class StateStore:
                     "stop_price": str(plan.stop_price),
                     "direction": plan.direction,
                     "liquidation_requested": plan.liquidation_requested,
+                    "favorable_extreme": str(plan.favorable_extreme) if plan.favorable_extreme else None,
+                    "last_sample_price": str(plan.last_sample_price) if plan.last_sample_price else None,
+                    "last_sample_time": plan.last_sample_time,
+                    "reversal_samples": plan.reversal_samples,
+                    "opened_day": plan.opened_day,
                 }
                 for symbol, plan in plans.items()
             }
@@ -85,6 +95,7 @@ class EquityPerformanceStore:
             "active": {}, "orders": {}, "fills": {}, "adaptive": {},
             "reviewed_count": 0, "paused": False, "take_profit_sessions": {},
             "fallback_reviews": [],
+            "profit_reserve_usd": "0.00", "review_archives": [], "daily_reviews": None,
         }
         if self.path.exists():
             try:
@@ -121,6 +132,8 @@ class EquityPerformanceStore:
                 for trade in list(loaded["active"].values()) + loaded["trades"]:
                     if not isinstance(trade, dict) or trade["direction"] not in ("long", "short"):
                         raise ValueError("invalid trade")
+                    if any(name in trade and type(trade[name]) is not bool for name in ("fallback", "daily_peak")):
+                        raise ValueError("invalid strategy attribution")
                     if not isinstance(trade["entry_quantity"], int) or not isinstance(trade["exit_quantity"], int) or not 0 <= trade["exit_quantity"] <= trade["entry_quantity"] or trade["entry_quantity"] <= 0:
                         raise ValueError("invalid trade quantities")
                     if any(not Decimal(str(trade[field])).is_finite() or Decimal(str(trade[field])) < 0 for field in ("entry_notional", "exit_notional")):
@@ -130,6 +143,33 @@ class EquityPerformanceStore:
                         raise ValueError("invalid fill checkpoint")
                 if not isinstance(self.data["reviewed_count"], int) or not 0 <= self.data["reviewed_count"] <= len(self.data["trades"]):
                     raise ValueError("invalid review count")
+                reserve = Decimal(str(self.data["profit_reserve_usd"]))
+                if not reserve.is_finite() or reserve < 0:
+                    raise ValueError("invalid profit reserve")
+                if not isinstance(self.data["review_archives"], list) or any(not isinstance(item, dict) for item in self.data["review_archives"]):
+                    raise ValueError("invalid review archives")
+                daily = self.data["daily_reviews"]
+                if daily is not None:
+                    if not isinstance(daily, dict) or type(daily.get("trade_offset")) is not int or not 0 <= daily["trade_offset"] <= len(loaded["trades"]):
+                        raise ValueError("invalid daily review epoch")
+                    if not isinstance(daily.get("peak_results"), dict):
+                        raise ValueError("invalid peak results")
+                    eligible_ids = {trade["trade_id"] for trade in loaded["trades"][daily["trade_offset"]:] if trade.get("daily_peak")}
+                    if not set(daily["peak_results"]) <= eligible_ids:
+                        raise ValueError("invalid graded trade IDs")
+                    for result in daily["peak_results"].values():
+                        if not isinstance(result, dict) or type(result.get("win")) is not bool or result.get("strategy") not in ("main", "fallback"):
+                            raise ValueError("invalid peak result")
+                    for strategy in ("main", "fallback"):
+                        history = daily.get(strategy)
+                        if not isinstance(history, list) or any(
+                            not isinstance(review, dict) or type(review.get("wins")) is not int
+                            or not 0 <= review["wins"] <= 5 or review.get("through_trade") != (index + 1) * 5
+                            for index, review in enumerate(history)
+                        ):
+                            raise ValueError("invalid peak review history")
+                        if len(history) * 5 > sum(result["strategy"] == strategy for result in daily["peak_results"].values()):
+                            raise ValueError("peak reviews exceed graded results")
                 fallback_reviews = self.data["fallback_reviews"]
                 if not isinstance(fallback_reviews, list) or any(
                     not isinstance(review, dict) or type(review.get("wins")) is not int
@@ -150,16 +190,43 @@ class EquityPerformanceStore:
     def key(self, order: PaperOrder) -> str:
         return order.client_order_id or str(order.order_id)
 
+    def start_daily_reviews(self, now: datetime) -> None:
+        if self.data["daily_reviews"] is not None:
+            return
+        self.data["review_archives"].append({
+            "archived_at": now.isoformat(), "reviews": self.data["reviews"],
+            "fallback_reviews": self.data["fallback_reviews"], "adaptive": self.data["adaptive"],
+            "take_profit_sessions": self.data["take_profit_sessions"],
+            "paused": self.data["paused"], "pause_reason": self.data.get("pause_reason"),
+        })
+        self.data["daily_reviews"] = {
+            "started_at": now.isoformat(), "trade_offset": len(self.data["trades"]),
+            "main": [], "fallback": [], "peak_results": {},
+        }
+        self.data["reviews"] = []
+        self.data["fallback_reviews"] = []
+        self.data["adaptive"] = {}
+        self.data["take_profit_sessions"] = {}
+        self.data["reviewed_count"] = len(self.data["trades"])
+        if self.data.get("pause_reason") == "Four-of-five trade target missed at all tightening limits":
+            self.data["paused"] = False
+            self.data.pop("pause_reason", None)
+        self.save()
+
     @property
     def recovery_ids(self) -> frozenset[str]:
         return frozenset(self.data["orders"])
 
-    def track_order(self, order: PaperOrder, role: str, *, fallback: bool = False) -> None:
+    def track_order(self, order: PaperOrder, role: str, *, fallback: bool = False,
+                    chase_anchor: Decimal | None = None) -> None:
         key = self.key(order)
         if key not in self.data["orders"]:
             self.data["orders"][key] = {
                 "symbol": order.symbol, "side": order.side.value,
                 "quantity": order.quantity, "role": role,
+                "order_type": order.order_type.value,
+                "limit_price": str(order.limit_price) if order.limit_price is not None else None,
+                "chase_anchor": str(chase_anchor or order.limit_price) if (chase_anchor or order.limit_price) is not None else None,
             }
             if role == "ENTRY" and fallback:
                 self.data["orders"][key]["fallback"] = True
@@ -209,6 +276,8 @@ class EquityPerformanceStore:
                 }
                 if self.data["orders"].get(key, {}).get("fallback") is True:
                     trade["fallback"] = True
+                if self.data["daily_reviews"] is not None:
+                    trade["daily_peak"] = True
                 self.data["active"][order.symbol] = trade
             trade["entry_quantity"] += delta
             trade["entry_notional"] = str(Decimal(trade["entry_notional"]) + incremental)
@@ -251,6 +320,10 @@ class EquityPerformanceStore:
                       "exit_average_price": str(Decimal(trade["exit_notional"]) / trade["exit_quantity"]),
                       "outcome": "win" if pnl > 0 else "loss" if pnl < 0 else "flat"}
             self.data["trades"].append(record)
+            if trade.get("daily_peak") is True and pnl > 0:
+                self.data["profit_reserve_usd"] = str(
+                    Decimal(self.data["profit_reserve_usd"]) + (pnl / 2).quantize(Decimal("0.01"))
+                )
             completed.append(record)
             del self.data["active"][symbol]
         recovered_fill_pause = (
@@ -285,10 +358,14 @@ class EquityPerformanceStore:
             review = {"through_trade": start + 5, "reviewed_at": now.isoformat(),
                       "wins": wins, "trades": 5, "target_wins": 4, "changes": changes,
                       "paused": self.data["paused"]}
+            if self.data["daily_reviews"] is not None:
+                offset = self.data["daily_reviews"]["trade_offset"]
+                review["realized_pnl_usd"] = str(sum((Decimal(trade["realized_pnl_usd"]) for trade in window), Decimal("0.00")))
+                review["cumulative_pnl_usd"] = str(sum((Decimal(trade["realized_pnl_usd"]) for trade in self.data["trades"][offset:start + 5]), Decimal("0.00")))
             self.data["reviews"].append(review)
             self.data["reviewed_count"] += 5
             reviews.append(review)
-        if completed:
+        if completed and self.data["daily_reviews"] is None:
             reviews.extend(self._review_fallback(now))
         if completed or reviews or self.data["paused"] or recovered_fill_pause:
             self.save()
@@ -296,7 +373,54 @@ class EquityPerformanceStore:
 
     @property
     def fallback_tightening_level(self) -> int:
+        daily = self.data["daily_reviews"]
+        if daily is not None:
+            return min(4, sum(review["wins"] < 4 for review in daily["fallback"]))
         return min(4, sum(review["wins"] < 4 for review in self.data["fallback_reviews"]))
+
+    def peak_tightening_level(self, strategy: str) -> int:
+        daily = self.data["daily_reviews"]
+        return min(4, sum(review["wins"] < 4 for review in daily[strategy])) if daily else 0
+
+    def grade_peak(self, trade: dict[str, Any], now: datetime, high: Decimal,
+                   low: Decimal, tolerance: float) -> list[dict[str, Any]]:
+        daily = self.data["daily_reviews"]
+        if daily is None or not trade.get("daily_peak") or trade["trade_id"] in daily["peak_results"]:
+            return []
+        closed = datetime.fromisoformat(trade["closed_at"]).astimezone(EASTERN)
+        if now.astimezone(EASTERN).date() <= closed.date():
+            return []
+        if any(not value.is_finite() or value <= 0 for value in (high, low)) or low > high:
+            return []
+        exit_price = Decimal(trade["exit_average_price"])
+        if not low <= exit_price <= high:
+            return []
+        extreme = low if trade["direction"] == "short" else high
+        distance = abs(exit_price - extreme) / extreme * 100
+        strategy = "fallback" if trade.get("fallback") else "main"
+        daily["peak_results"][trade["trade_id"]] = {
+            "strategy": strategy, "win": distance <= Decimal(str(tolerance)),
+            "high": str(high), "low": str(low), "exit_price": str(exit_price),
+            "distance_percent": str(distance), "graded_at": now.isoformat(),
+        }
+        reviews = []
+        eligible = [item for item in self.data["trades"][daily["trade_offset"]:]
+                    if item.get("daily_peak") and ("fallback" if item.get("fallback") else "main") == strategy]
+        start = len(daily[strategy]) * 5
+        while len(eligible) - start >= 5:
+            window = eligible[start:start + 5]
+            if any(item["trade_id"] not in daily["peak_results"] for item in window):
+                break
+            wins = sum(daily["peak_results"][item["trade_id"]]["win"] for item in window)
+            review = {"strategy": strategy, "wins": wins, "trades": 5, "target_wins": 4,
+                      "through_trade": start + 5, "reviewed_at": now.isoformat(),
+                      "tightening_level": min(4, self.peak_tightening_level(strategy) + (wins < 4)),
+                      "tolerance_percent": tolerance}
+            daily[strategy].append(review)
+            reviews.append(review)
+            start += 5
+        self.save()
+        return reviews
 
     def _review_fallback(self, now: datetime) -> list[dict[str, Any]]:
         history = self.data["fallback_reviews"]

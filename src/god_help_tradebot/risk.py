@@ -51,6 +51,10 @@ def build_trade_plan(
         max_value = Decimal(str(config.max_position_value_usd))
         quantity_by_value = int((max_value / entry).to_integral_value(rounding=ROUND_DOWN))
         quantity = min(quantity_by_risk, quantity_by_value)
+    if config.daily_peak_mode:
+        if account_value is None or not Decimal(str(account_value)).is_finite() or account_value <= 0:
+            raise ValueError("daily peak sizing requires current reserve-adjusted buying power")
+        quantity = min(quantity, int(Decimal(str(account_value)) * MARKET_ORDER_HEADROOM / entry))
     quantity = min(quantity, MAX_ORDER_QUANTITY)
     if quantity < 1:
         raise ValueError("configured limits do not allow one share at this stop distance")
@@ -93,6 +97,10 @@ def build_short_plan(
         max_value = Decimal(str(config.max_position_value_usd))
         quantity_by_value = int((max_value / entry).to_integral_value(rounding=ROUND_DOWN))
         quantity = min(quantity_by_risk, quantity_by_value)
+    if config.daily_peak_mode:
+        if account_value is None or not Decimal(str(account_value)).is_finite() or account_value <= 0:
+            raise ValueError("daily peak sizing requires current reserve-adjusted buying power")
+        quantity = min(quantity, int(Decimal(str(account_value)) * MARKET_ORDER_HEADROOM / entry))
     quantity = min(quantity, MAX_ORDER_QUANTITY)
     if quantity < 1:
         raise ValueError("configured limits do not allow one share at this stop distance")
