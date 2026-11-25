@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Any
 
 from .broker import US_STOCK_CATEGORY, is_rate_limit_error
-from .schedule import EASTERN, equity_order_session
+from .schedule import EASTERN
 
 
 def market_time(value: Any) -> datetime | None:
@@ -50,9 +50,9 @@ def orderflow_score(broker: Any, symbol: str, now: datetime | None = None) -> fl
             if not size.is_finite() or size <= 0:
                 continue
             side = str(row.get("side", "")).upper()
-            if side in ("BUY", "B"):
+            if side in ("BUY", "B", "G", "NB"):
                 buy += size
-            elif side in ("SELL", "S"):
+            elif side in ("SELL", "S", "L", "NS"):
                 sell += size
         return float(buy / (buy + sell)) if buy + sell > 0 else None
     except Exception as error:
@@ -66,28 +66,48 @@ def full_day_extremes(broker: Any, symbol: str, day: date) -> tuple[Decimal, Dec
 
     start = datetime.combine(day, time(), EASTERN)
     end = start + timedelta(days=1)
-    response = broker.session.data_client.market_data.get_batch_history_bar(
-        [symbol], US_STOCK_CATEGORY, "m5", count="1200", real_time_required=True,
-        trading_sessions=["PRE", "RTH", "ATH", "OVN"],
-        start_time=int(start.timestamp() * 1000), end_time=int(end.timestamp() * 1000) - 1,
-    )
-    if response.status_code != 200:
-        if response.status_code == 429:
-            raise RuntimeError("HTTP Status: 429; historical data rate limited")
+    cursor = int(end.timestamp() * 1000) - 1
+    valid = {}
+    covered = False
+    for _ in range(4):
+        response = broker.session.data_client.market_data.get_batch_history_bar(
+            [symbol], US_STOCK_CATEGORY, "M5", count=1200, real_time_required=True,
+            trading_sessions=["PRE", "RTH", "ATH", "OVN"], end_time=cursor,
+        )
+        if response.status_code != 200:
+            if response.status_code == 429:
+                raise RuntimeError("HTTP Status: 429; historical data rate limited")
+            return None
+        payload = response.json()
+        if isinstance(payload, dict) and (payload.get("partial") is True or payload.get("complete") is False):
+            return None
+        series = payload.get("result", []) if isinstance(payload, dict) else []
+        if isinstance(series, list) and any(isinstance(item, dict) and item.get("symbol") and item["symbol"].upper() != symbol.upper() for item in series):
+            return None
+        bars = bars_from_response(payload)
+        if not bars:
+            covered = True
+            break
+        stamps = []
+        for bar in bars:
+            stamp = market_time(bar.time)
+            if stamp is None or int(stamp.timestamp() * 1000) > cursor:
+                return None
+            if not Decimal(str(bar.volume)).is_finite() or bar.volume < 0:
+                return None
+            stamps.append(stamp)
+            if start <= stamp < end and bar.volume > 0:
+                if any(not Decimal(str(value)).is_finite() or value <= 0 for value in (bar.high, bar.low)) or bar.low > bar.high:
+                    return None
+                valid[stamp] = bar
+        earliest = min(stamps)
+        if earliest <= start:
+            covered = True
+            break
+        next_cursor = int(earliest.timestamp() * 1000) - 1
+        if next_cursor >= cursor:
+            return None
+        cursor = next_cursor
+    if not covered or not valid:
         return None
-    bars = bars_from_response(response.json())
-    valid = [bar for bar in bars if (stamp := market_time(bar.time)) is not None and start <= stamp < end
-             and all(Decimal(str(value)).is_finite() and value > 0 for value in (bar.high, bar.low))
-             and bar.low <= bar.high]
-    if not valid or len(valid) != len(bars):
-        return None
-    covered = {market_time(bar.time).astimezone(EASTERN).replace(second=0, microsecond=0) for bar in valid}
-    expected = set()
-    timestamp = start
-    while timestamp < end:
-        if equity_order_session(timestamp) != "CLOSED":
-            expected.add(timestamp)
-        timestamp += timedelta(minutes=5)
-    if not expected or not expected <= covered:
-        return None
-    return Decimal(str(max(bar.high for bar in valid))), Decimal(str(min(bar.low for bar in valid)))
+    return Decimal(str(max(bar.high for bar in valid.values()))), Decimal(str(min(bar.low for bar in valid.values())))

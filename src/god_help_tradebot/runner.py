@@ -145,7 +145,8 @@ def run_bot(
         execution_controller.restore(loop)
         from .webull_history import WebullHistoryResearch
         if isinstance(broker, WebullSandboxBroker):
-            webull_history = WebullHistoryResearch(root / "webull", broker.session.data_client.market_data.get_batch_history_bar)
+            webull_history = WebullHistoryResearch(root / "webull", broker.session.data_client.market_data.get_batch_history_bar,
+                                                  broker.session.data_client)
 
     if config.account_price_priority:
         buying_power = loop._account_value()

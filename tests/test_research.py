@@ -304,3 +304,91 @@ def test_daily_history_uses_verified_end_only_paging(tmp_path):
     assert "end_time" in calls[0]
     assert "start_time" not in calls[0]
     assert "trading_sessions" not in calls[0]
+
+
+def test_historical_inputs_never_backdate_current_ratings_or_sentiment(tmp_path):
+    from god_help_tradebot.historical_inputs import HistoricalInputArchive
+
+    now = datetime(2026, 11, 25, 12, tzinfo=EASTERN)
+    archive = HistoricalInputArchive(tmp_path)
+    archive.ingest("TEST", "analysts", [{"buy": 10, "sell": 1}], now)
+    archive.ingest("TEST", "news", [{"news_id": "1", "publish_time": (now - timedelta(days=1)).isoformat(),
+                                      "sentiment": "POSITIVE"}], now)
+    before = archive.features("TEST", [], now - timedelta(hours=1))
+    assert "analyst_buy_ratio" not in before
+    assert "news_score" not in before
+    assert before["news_article_count"] == 1
+    after = archive.features("TEST", [], now)
+    assert after["analyst_buy_ratio"] == pytest.approx(10 / 11)
+    assert after["news_score"] == 1
+
+
+def test_historical_reconstruction_ignores_future_bars_and_preserves_observed_report(tmp_path):
+    from god_help_tradebot.historical_inputs import HistoricalInputArchive
+    from god_help_tradebot.patterns import Bar
+
+    now = datetime(2026, 11, 25, 12, tzinfo=EASTERN)
+    archive = HistoricalInputArchive(tmp_path / "archive")
+    future = Bar((now + timedelta(hours=1)).isoformat(), 1, 100, 1, 100, 1000)
+    assert "pattern_score" not in archive.features("TEST", [future], now)
+    features = {"asof": now.isoformat(), "symbol": "TEST", "sources": {}, "missing": [], "pattern_score": 0.9,
+                "bear_pattern_score": 0.2, "large_flow_ratio": 0.7}
+    path = tmp_path / "features.jsonl"
+    path.write_text(__import__("json").dumps({"time": now.isoformat(), "historical_features": {"TEST": features}}) + "\n")
+    observed = {"score": 0.6, "passed": True, "signals_present": 2, "asof": now.isoformat()}
+    step = {"time": now.isoformat(), "confirmations": {"TEST": {"bullish": dict(observed), "bearish": dict(observed)}}}
+    archive.overlay_steps([step], path)
+    assert step["confirmations"]["TEST"]["bullish"]["score"] == 0.6
+    assert step["confirmations"]["TEST"]["bearish"]["pattern_score"] == 0.2
+    assert "orderflow_score" not in step["confirmations"]["TEST"]["bullish"]
+
+
+def test_historical_verified_quotes_and_borrow_overlay_without_invention(tmp_path):
+    from god_help_tradebot.historical_inputs import HistoricalInputArchive
+
+    now = datetime(2026, 11, 25, 12, tzinfo=EASTERN)
+    archive = HistoricalInputArchive(tmp_path)
+    archive.ingest("TEST", "quotes", [{"available_at": now.isoformat(), "bid": 10, "ask": 10.1, "last": 10,
+                                        "bid_volume": 100, "ask_volume": 200}], now)
+    archive.ingest("TEST", "borrow", [{"available_at": now.isoformat(), "shortable": True}], now)
+    before = {"time": (now - timedelta(seconds=1)).isoformat(), "snapshots": [{"symbol": "TEST"}]}
+    after = {"time": now.isoformat(), "snapshots": [{"symbol": "TEST"}]}
+    archive.overlay_steps([before, after], tmp_path / "missing-features.jsonl")
+    assert not before.get("quotes")
+    assert after["quotes"][0]["bid"] == 10
+    assert after["shortable"]["TEST"] is True
+
+
+def test_input_collector_permission_failure_is_not_an_empty_historical_signal(tmp_path):
+    from god_help_tradebot.historical_inputs import WebullInputCollector
+    from god_help_tradebot.research import read_json
+    from types import SimpleNamespace
+
+    collector = WebullInputCollector(tmp_path, None)
+    collector.seed(["TEST"])
+    collector.request = lambda item: SimpleNamespace(status_code=403)
+    result = collector.tick(datetime(2026, 11, 25, 12, tzinfo=EASTERN))
+    assert result["status"] == "permission_blocked"
+    assert result["records"] == 0
+    assert read_json(tmp_path / "coverage.json")["no_subscriptions_purchased"]
+
+
+def test_collected_bar_features_export_only_completed_unadjusted_bars(tmp_path):
+    import json
+    from god_help_tradebot.historical_inputs import HistoricalInputArchive
+
+    now = datetime(2026, 11, 25, 12, tzinfo=EASTERN)
+    rows = []
+    for index in range(31):
+        stamp = now - timedelta(minutes=5 * (31 - index))
+        price = 100 + index / 10
+        rows.append(dict(time=stamp.isoformat(), open=price, high=price + 1, low=price - 1, close=price, volume=100))
+    rows.append(dict(time=(now + timedelta(hours=1)).isoformat(), open=1, high=1000, low=1, close=1000, volume=100000))
+    root = tmp_path / "bars" / "TEST-M5"
+    write_json(root / "1000.json", {"adjustment": "unadjusted", "bars": rows})
+    archive = HistoricalInputArchive(tmp_path / "archive")
+    output = tmp_path / "features.jsonl"
+    assert archive.export_bar_features(tmp_path / "bars", output, now=now) == 31
+    features = [json.loads(line) for line in output.read_text().splitlines()]
+    assert all(datetime.fromisoformat(row["time"]) <= now for row in features)
+    assert "orderflow_score" not in features[-1]["historical_features"]["TEST"]

@@ -175,10 +175,14 @@ class WebullHistoryCollector:
 
 
 class WebullHistoryResearch:
-    def __init__(self, root: Path, get_bars: Callable) -> None:
+    def __init__(self, root: Path, get_bars: Callable, data_client: Any = None) -> None:
         self.minute = WebullHistoryCollector(root, get_bars, timespan="M5")
         self.daily = WebullHistoryCollector(root, get_bars, timespan="D")
         self.seeded_at: datetime | None = None
+        self.input_collector = None
+        if data_client is not None:
+            from .historical_inputs import WebullInputCollector
+            self.input_collector = WebullInputCollector(root / "inputs", data_client)
 
     def tick(self, loop: Any) -> dict[str, Any]:
         if loop.exit_plans or loop._pending_limit or loop._pending_exits or loop._rate_limit_backoff_active or loop._consecutive_errors:
@@ -194,7 +198,19 @@ class WebullHistoryResearch:
             symbols = list(dict.fromkeys(symbols))[:20]
             self.minute.seed(symbols, now)
             self.daily.seed(symbols, now)
+            if self.input_collector is not None:
+                self.input_collector.seed(symbols)
             self.seeded_at = now
+        shared = read_json(self.minute.state_path, {})
+        if shared.get("next_attempt") and now < datetime.fromisoformat(shared["next_attempt"]):
+            return {"status": "cooldown"}
+        slot = shared.get("request_slot", 0) + 1
+        shared["request_slot"] = slot
+        if self.input_collector is not None and slot % 2 == 0:
+            shared["next_attempt"] = (now + timedelta(minutes=1)).isoformat()
+            write_json(self.minute.state_path, shared)
+            return self.input_collector.tick(now)
+        write_json(self.minute.state_path, shared)
         return self.minute.tick(now)
 
 

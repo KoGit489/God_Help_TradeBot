@@ -83,6 +83,9 @@ def audit_dataset(directory: Path, now: datetime, config: BotConfig) -> tuple[di
             raise ValueError("history file must be an existing dataset-local JSON/JSONL file")
         paths.append(path)
     steps = merge_steps(paths, now=now)
+    from .historical_inputs import HistoricalInputArchive
+    archive = HistoricalInputArchive(directory.parent / "webull" / "inputs" / "archive")
+    augmented = archive.overlay_steps(steps, directory.parent / "webull" / "reconstructed-features.jsonl")
     if not steps:
         reasons.append("no historical timeline")
     days = sorted({datetime.fromisoformat(step["time"]).date() for step in steps})
@@ -149,10 +152,13 @@ def audit_dataset(directory: Path, now: datetime, config: BotConfig) -> tuple[di
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(65536), b""):
                 fingerprint.update(chunk)
+    for chunk in json.JSONEncoder(sort_keys=True, allow_nan=False).iterencode(steps):
+        fingerprint.update(chunk.encode())
     return {"ready": not reasons, "reasons": sorted(set(reasons)), "dataset_id": manifest.get("dataset_id"),
             "source": manifest.get("source"), "first_day": str(days[0]) if days else None,
             "last_day": str(days[-1]) if days else None, "trading_days": len(days), "symbols": len(symbols),
             "signal_observations": signal_counts, "executable_quotes": executable_quotes,
+            "historical_fields_augmented": augmented,
             "coverage_mode": "maximum_available" if maximum_available else "five_years", "coverage_sufficient": coverage_sufficient,
             "fingerprint": fingerprint.hexdigest()}, steps
 
@@ -212,6 +218,10 @@ class ResearchPipeline:
         state = read_json(self.root / "state.json", {"version": 1, "experiments": []})
         if read_json(self.root / "policy.json") != POLICY:
             return self.save(state, "blocked_policy", reason="approved execution bounds/gates do not match")
+        from .historical_inputs import HistoricalInputArchive
+        webull = self.root / "webull"
+        archive = HistoricalInputArchive(webull / "inputs" / "archive")
+        archive.export_bar_features(webull / "bars", webull / "reconstructed-features.jsonl", now=now)
         audit, steps = audit_dataset(self.root / "history", now, config)
         state["audit"] = audit
         if not audit["ready"]:

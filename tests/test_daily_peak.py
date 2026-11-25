@@ -241,7 +241,7 @@ def test_orderflow_uses_only_recent_known_side_prints_and_full_day_request():
     ]
     calls = []
     start = now.replace(hour=0, minute=0)
-    day_bars = [{"time": (start + timedelta(minutes=5 * index)).isoformat(), "high": 120, "low": 90}
+    day_bars = [{"time": (start + timedelta(minutes=5 * index)).isoformat(), "high": 120, "low": 90, "volume": 1}
                 for index in range(288)]
     market = SimpleNamespace(get_tick=lambda *args, **kwargs: Response({"result": rows}),
                              get_batch_history_bar=lambda *args, **kwargs: (
@@ -250,9 +250,30 @@ def test_orderflow_uses_only_recent_known_side_prints_and_full_day_request():
     assert orderflow_score(broker, "TEST", now) == 0.75
     assert full_day_extremes(broker, "TEST", now.date()) == (Decimal("120.0"), Decimal("90.0"))
     assert len(calls[0]["trading_sessions"]) == 4
-    assert calls[0]["end_time"] > calls[0]["start_time"]
+    assert "start_time" not in calls[0]
     day_bars.pop()
-    assert full_day_extremes(broker, "TEST", now.date()) is None
+    assert full_day_extremes(broker, "TEST", now.date()) == (Decimal("120.0"), Decimal("90.0"))
+
+
+def test_sparse_full_day_bars_can_be_graded_when_query_covers_day_boundary():
+    from datetime import time
+
+    day = _now().date()
+    start = datetime.combine(day, time(), EASTERN)
+    rows = [dict(time=(start + timedelta(hours=11)).isoformat(), open=100, high=120, low=90, close=110, volume=10),
+            dict(time=(start - timedelta(minutes=5)).isoformat(), open=80, high=85, low=75, close=80, volume=10)]
+    market = SimpleNamespace(get_batch_history_bar=lambda *args, **kwargs:
+                             SimpleNamespace(status_code=200, json=lambda: {"result": [{"symbol": "TEST", "result": rows}]}))
+    broker = SimpleNamespace(session=SimpleNamespace(data_client=SimpleNamespace(market_data=market)))
+    assert full_day_extremes(broker, "TEST", day) == (Decimal("120"), Decimal("90"))
+
+
+def test_full_day_review_rejects_endpoint_that_ignores_backward_cursor():
+    row = dict(time=_now().isoformat(), high=120, low=90, volume=10)
+    market = SimpleNamespace(get_batch_history_bar=lambda *args, **kwargs:
+                             SimpleNamespace(status_code=200, json=lambda: {"result": [{"result": [row]}]}))
+    broker = SimpleNamespace(session=SimpleNamespace(data_client=SimpleNamespace(market_data=market)))
+    assert full_day_extremes(broker, "TEST", _now().date()) is None
 
 
 def test_overnight_quotes_require_matching_symbol_and_fresh_timestamp(monkeypatch):

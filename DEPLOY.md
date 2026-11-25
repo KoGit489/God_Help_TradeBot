@@ -60,11 +60,13 @@ P&L are logged separately; a 4/5 win rate can still lose money.
 `main_peak.log` and `fallback_peak.log` record their own after-day grades
 and independent batches of five. A hit means the average exit fill is
 within 1% of the full Eastern day's high (long) or low (short). Grading
-waits until the CLOSED trade's day ends and requires timestamped bars
-covering all eligible five-minute intervals, plus a consistent fill/day
-range. Missing intervals stay ungraded, even for illiquid stocks; logs
-report the wait. Full-session data permissions must be verified on the
-VPS before relying on these scores. Review requests are bounded hourly.
+waits until the CLOSED trade's day ends and pages timestamped M5 bars backward
+through the day's boundary (at most four 1,200-bar pages), with a consistent
+fill/day range. It grades traded bars rather than requiring activity in every
+five-minute slot. Zero-volume slots do not create extrema. Empty/non-progressing,
+malformed or demonstrably truncated responses cannot invent a peak; unavailable
+day ranges stay pending. Full-session permissions still need verification.
+Review requests remain bounded hourly.
 
 Each missed main/fallback peak batch raises its separate level up to four.
 Both reduce the reversal threshold by 0.15 percentage points per level
@@ -196,6 +198,56 @@ Check `research/report.json`, `research/worker.log`, and the app's
 `research_promotion`, `research_promotion_blocked`, and `research_rollback`
 events. Keep the execution ledger and research artifacts backed up. Validation
 and paper fills do not guarantee real-market profitability.
+
+## Historical Input Integrations
+
+The research data layer now reconstructs bullish/bearish chart features from
+completed, unadjusted M5 bars using the same pattern code as the bot. It does
+not use future bars or forward-adjusted daily prices as intraday inputs.
+`research/webull/reconstructed-features.jsonl` contains dated features, sources
+and missing groups. The audit overlays these and verified imports only into
+missing replay fields; observed confirmation scores/pass decisions are retained.
+The resulting replay content is included in the dataset fingerprint.
+
+Quiet-cycle collection alternates bar and input requests within one shared
+one-request-per-minute budget. Added read-only adapters cover stock-news cursor
+pagination, five-record capital flow, latest analyst ratings, one-minute
+footprints, observed quote depth, and the corporate-action endpoint when
+supported. They do not place orders or buy data subscriptions. Archive growth
+and pagination are bounded; permission and unavailable-endpoint statuses are
+reported under `research/webull/inputs/coverage.json`.
+
+Latest analyst ratings cannot be backdated. News publication time is separate
+from sentiment availability; an old article with a classification retrieved
+today is not treated as a historically known sentiment signal. Footprints and
+Webull sentiment are diagnostic source data, not silently substituted for the
+live tick window or the live news provider. Unsupported overnight footprints,
+limited capital-flow history and incomplete historical quote/universe/borrow
+data remain provider constraints, not fabricated observations.
+
+The local sandbox check returned five capital-flow records and one rating
+record. Footprints returned `UNAUTHORIZED`; news/corporate-action requests were
+unavailable through that connection. These statuses do not claim that another
+entitlement or provider could never supply the data.
+
+To connect properly dated external archives without changing bot code:
+
+```bash
+.venv/bin/python -m god_help_tradebot.historical_inputs --import-file verified-inputs.json
+```
+
+The JSON object requires `symbol`, `kind`, `retrieved_at`, `source`, and `records`.
+Supported kinds: `news`, `capital_flow`, `analysts`, `orderflow`, `quotes`,
+`corporate_actions`, `borrow`, and `universe`. Records need explicit aware
+`available_at`/`asof` timestamps for historical use; absent timestamps default
+conservatively to retrieval time. News also needs `publish_time`; historical
+sentiment needs its own `sentiment_asof`. Quotes need actual bid/ask/depth,
+borrow needs a verified boolean, and actions need `effective_at` and a verified
+split ratio or dividend amount. The importer does not certify external data
+quality or automatically mark a universe/manifest complete.
+
+These integrations preserve all promotion gates. Complete historical execution
+and universe evidence still cannot be inferred merely from a price chart.
 
 ## Webull Historical Collection
 
