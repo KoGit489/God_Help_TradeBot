@@ -1,6 +1,8 @@
 ﻿from datetime import datetime, time
 from decimal import Decimal
 
+import pytest
+
 from god_help_tradebot import (
     BotConfig,
     ExitPlan,
@@ -72,6 +74,91 @@ def test_rate_limit_uses_cooldown_without_counting_toward_halt():
     loop.run_once()
     assert loop._rate_limit_backoff_active is False
     assert loop.error_backoff_seconds == 30
+
+
+def test_account_outage_retries_with_reconciliation_before_polling():
+    class UnavailableBroker(PaperBroker):
+        def __init__(self):
+            super().__init__(1_000)
+            self.calls = []
+            self.fail_positions = True
+            self.fail_orders = True
+
+        def get_positions(self):
+            self.calls.append("positions")
+            if self.fail_positions:
+                raise RuntimeError("HTTP Status: 503, Code: SERVICE_NOT_AVAILABLE")
+            return super().get_positions()
+
+        def assert_no_remote_open_orders(self):
+            self.calls.append("orders")
+            if self.fail_orders:
+                raise RuntimeError("HTTP 503")
+
+    broker = UnavailableBroker()
+    loop = MonitorLoop(broker, now_provider=_open_market_now, flatten_before_close=False)
+    summary = loop.run_once()
+    assert loop._account_recovery_required
+    assert loop._consecutive_errors == 0
+    assert loop.error_backoff_seconds == 30
+    assert broker.calls == ["positions"]
+
+    for delay in (60, 120, 240, 300, 300):
+        loop.run_once(summary)
+        assert loop.error_backoff_seconds == delay
+        assert loop._consecutive_errors == 0
+    assert broker.calls == ["positions"] + ["orders"] * 5
+
+    broker.fail_orders = False
+    loop.run_once(summary)
+    assert broker.calls[-2:] == ["orders", "positions"]
+    assert loop._account_recovery_required
+    broker.fail_positions = False
+    loop.run_once(summary)
+    assert broker.calls[-3:] == ["orders", "positions", "positions"]
+    assert not loop._account_recovery_required
+    assert not loop._service_unavailable_backoff_active
+    assert loop.error_backoff_seconds == 30
+    assert any(event.kind == "account_recovered" for event in summary.events)
+
+
+def test_unexpected_remote_order_keeps_outage_recovery_locked():
+    class UnexpectedOrderBroker(PaperBroker):
+        def assert_no_remote_open_orders(self):
+            raise RuntimeError("unexpected remote order")
+
+    loop = MonitorLoop(UnexpectedOrderBroker(1_000))
+    loop._account_recovery_required = True
+    loop._run_cycle = lambda summary: pytest.fail("must not poll before reconciliation")
+    result = loop.run_once()
+    assert loop._account_recovery_required
+    assert loop._consecutive_errors == 1
+    assert result.events[-1].kind == "error"
+
+
+def test_outage_recovery_allows_only_ledger_tracked_remote_orders():
+    from types import SimpleNamespace
+
+    class TrackedOrderBroker(PaperBroker):
+        def assert_no_remote_open_orders(self, *, allowed_client_order_ids):
+            assert allowed_client_order_ids == frozenset({"tracked-order"})
+
+    loop = MonitorLoop(TrackedOrderBroker(1_000))
+    loop.performance_store = SimpleNamespace(recovery_ids=frozenset({"tracked-order"}))
+    loop._account_recovery_required = True
+    loop._run_cycle = lambda summary: setattr(summary, "polls", summary.polls + 1)
+    result = loop.run_once()
+    assert not loop._account_recovery_required
+    assert result.events[-1].kind == "account_recovered"
+
+
+def test_order_operation_503_is_not_treated_as_safe_account_read_retry():
+    loop = MonitorLoop(PaperBroker(1_000))
+    loop._run_cycle = lambda summary: (_ for _ in ()).throw(RuntimeError("HTTP 503"))
+    result = loop.run_once()
+    assert loop._consecutive_errors == 1
+    assert not loop._service_unavailable_backoff_active
+    assert result.events[-1].kind == "error"
 
 
 def test_monitor_exits_at_target_price() -> None:

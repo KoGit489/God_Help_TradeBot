@@ -9,6 +9,57 @@ from god_help_tradebot import runner
 from god_help_tradebot.broker import WebullSandboxBroker
 
 
+def test_service_unavailable_classification_is_specific():
+    from god_help_tradebot.broker import is_service_unavailable_error
+
+    assert is_service_unavailable_error(RuntimeError("HTTP Status: 503, Code: SERVICE_NOT_AVAILABLE"))
+    assert is_service_unavailable_error(SimpleNamespace(status_code=503))
+    assert not is_service_unavailable_error(RuntimeError("Cannot verify server-side open orders"))
+    assert not is_service_unavailable_error(RuntimeError("HTTP Status: 429, Code: TOO_MANY_REQUESTS"))
+
+
+def test_startup_retries_only_service_unavailable(monkeypatch, caplog):
+    sleeps = []
+    attempts = []
+
+    def account_check():
+        attempts.append(1)
+        if len(attempts) <= 6:
+            raise RuntimeError("HTTP Status: 503, Code: SERVICE_NOT_AVAILABLE")
+        return "verified"
+
+    monkeypatch.setattr(runner.time, "sleep", sleeps.append)
+    assert runner._retry_account_read(account_check, logging.getLogger("test-startup-retry"), None) == "verified"
+    assert sleeps == [30, 60, 120, 240, 300, 300]
+    assert "trading remains blocked" in caplog.text
+
+    with pytest.raises(RuntimeError, match="unsafe order"):
+        runner._retry_account_read(lambda: (_ for _ in ()).throw(RuntimeError("unsafe order")),
+                                   logging.getLogger("test-startup-retry"), None)
+    assert len(sleeps) == 6
+
+
+def test_startup_retry_honors_stop_flag(monkeypatch):
+    monkeypatch.setattr(runner.time, "sleep", lambda seconds: pytest.fail("must stop before sleeping"))
+    with pytest.raises(runner._StartupStopped):
+        runner._retry_account_read(lambda: (_ for _ in ()).throw(RuntimeError("HTTP 503")),
+                                   logging.getLogger("test-startup-stop"), lambda: True)
+
+
+def test_remote_orders_503_is_retryable_but_other_responses_block():
+    from god_help_tradebot.broker import is_service_unavailable_error
+
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker._resolve_account_id = lambda: "test-account"
+    response = SimpleNamespace(status_code=503)
+    broker.session = SimpleNamespace(trade_client=SimpleNamespace(
+        order_v3=SimpleNamespace(get_order_open=lambda *args, **kwargs: response)
+    ))
+    with pytest.raises(RuntimeError) as error:
+        broker.assert_no_remote_open_orders()
+    assert is_service_unavailable_error(error.value)
+
+
 class _Broker:
     sandbox_mode = True
     live_mode = False
@@ -18,6 +69,32 @@ class _Broker:
 
     def assert_no_remote_open_orders(self):
         pass
+
+    def get_positions(self):
+        return {}
+
+
+def test_startup_rechecks_orders_after_positions_503(monkeypatch):
+    class RecoveringBroker(_Broker):
+        def __init__(self):
+            self.calls = []
+
+        def assert_no_remote_open_orders(self):
+            self.calls.append("orders")
+
+        def get_positions(self):
+            self.calls.append("positions")
+            if self.calls.count("positions") == 1:
+                raise RuntimeError("HTTP 503")
+            return {}
+
+    broker = RecoveringBroker()
+    monkeypatch.setattr(runner.WebullSandboxBroker, "from_env", lambda: broker)
+    monkeypatch.setattr(runner.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(runner, "_setup_logging", lambda path: logging.getLogger("test-startup-reconcile"))
+    result = runner.run_bot(config=BotConfig(), record_data=False, stop_flag=lambda: False, max_polls=0)
+    assert result.polls == 0
+    assert broker.calls == ["orders", "positions", "orders", "positions"]
 
 
 class _Loop:

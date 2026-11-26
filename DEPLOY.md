@@ -2,6 +2,21 @@
 
 Runs the bot 24/7 without your home PC. Sandbox-only; live trading stays off.
 
+## Webull Account Outages
+
+HTTP 503 during startup account verification or the main positions read pauses
+normal polling and logs `service_unavailable_backoff`. Retries wait 30, 60,
+120, 240, then at most 300 seconds. Startup verifies both remote open orders
+and positions together; after a running outage, both are checked again before
+polling resumes. Unknown open orders, malformed position data, and other
+errors remain fail-closed. Background account research is deferred during
+recovery. Order submission errors are not treated as safe read-only retries.
+
+Warnings are written to the bot logs; they are not external notifications.
+During an outage the bot may be unable to manage an existing position or
+working order. Check the sandbox account directly, and never assume it is flat
+or clear its ledger merely because the service is waiting or restarting.
+
 ## Calendar-Day Peak Workflow
 
 The installed `god-help-tradebot` command now enables `daily_peak_mode`.

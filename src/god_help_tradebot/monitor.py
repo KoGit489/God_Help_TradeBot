@@ -14,7 +14,7 @@ from datetime import timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Callable
 
-from .broker import BrokerAdapter, WebullSandboxBroker, is_rate_limit_error, webull_error_code
+from .broker import BrokerAdapter, WebullSandboxBroker, is_rate_limit_error, is_service_unavailable_error, webull_error_code
 from .config import BotConfig
 from .confirm import confirm_candidate, confirm_candidate_bearish
 from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
@@ -69,6 +69,10 @@ class LoopSummary:
     exits: list[PaperOrder] = field(default_factory=list)
 
 
+class _AccountReadUnavailable(RuntimeError):
+    pass
+
+
 class MonitorLoop:
     """Poll-driven position monitor and bracket-exit manager."""
 
@@ -120,6 +124,9 @@ class MonitorLoop:
         self._market_news: Any | None = None
         self._consecutive_errors = 0
         self._rate_limit_backoff_active = False
+        self._service_unavailable_backoff_active = False
+        self._service_unavailable_attempts = 0
+        self._account_recovery_required = False
         self._exchange_calendar_refresh_at = 0.0
         # Symbols whose exit was rejected for the current session (e.g. not
         # eligible for overnight trading); retried when the session changes.
@@ -211,15 +218,37 @@ class MonitorLoop:
         """
         summary = summary or LoopSummary()
         try:
+            if self._account_recovery_required:
+                self._verify_account_recovery()
+                summary.events.append(LoopEvent(
+                    "account_recovered", "account",
+                    "remote orders and positions verified; normal polling resumes",
+                ))
             self._run_cycle(summary)
             self._consecutive_errors = 0
             self._rate_limit_backoff_active = False
+            self._service_unavailable_backoff_active = False
+            self._service_unavailable_attempts = 0
             self.error_backoff_seconds = 30.0
         except Exception as exc:
             summary.polls += 1
+            if isinstance(exc, _AccountReadUnavailable):
+                self._account_recovery_required = True
+                self._consecutive_errors = 0
+                self._rate_limit_backoff_active = False
+                self._service_unavailable_backoff_active = True
+                self._service_unavailable_attempts += 1
+                self.error_backoff_seconds = min(300.0, 30.0 * 2 ** min(self._service_unavailable_attempts - 1, 4))
+                summary.events.append(LoopEvent(
+                    "service_unavailable_backoff", "account",
+                    f"Webull account verification unavailable; retrying after {self.error_backoff_seconds:.0f}s; "
+                    "orders and positions must be verified before trading resumes",
+                ))
+                return summary
             if is_rate_limit_error(exc):
                 self._consecutive_errors = 0
                 self._rate_limit_backoff_active = True
+                self._service_unavailable_backoff_active = False
                 self.error_backoff_seconds = 300.0
                 summary.events.append(LoopEvent(
                     "rate_limit_backoff", "account",
@@ -231,6 +260,24 @@ class MonitorLoop:
                 LoopEvent("error", "loop", f"{type(exc).__name__}: {exc} (x{self._consecutive_errors})")
             )
         return summary
+
+    def _account_read(self, operation: Callable[[], Any]) -> Any:
+        try:
+            return operation()
+        except Exception as error:
+            if is_service_unavailable_error(error):
+                raise _AccountReadUnavailable() from error
+            raise
+
+    def _verify_account_recovery(self) -> None:
+        if self.performance_store is not None:
+            self._account_read(lambda: self.broker.assert_no_remote_open_orders(
+                allowed_client_order_ids=self.performance_store.recovery_ids
+            ))
+        else:
+            self._account_read(self.broker.assert_no_remote_open_orders)
+        self._account_read(self.broker.get_positions)
+        self._account_recovery_required = False
 
     def _maybe_refresh_exchange_calendar(self, summary: LoopSummary) -> None:
         if not isinstance(self.broker, WebullSandboxBroker) or self.broker.session is None:
@@ -269,7 +316,7 @@ class MonitorLoop:
         self._sync_orders()
         self._reconcile_pending_entry(summary)
         self._log_fills(summary)
-        positions = self.broker.get_positions()
+        positions = self._account_read(self.broker.get_positions)
         if self.performance_store is not None:
             completed, reviews = self.performance_store.finalize(positions, self._now(), self._base_config, self._base_confirmation_score)
             for trade in completed:
@@ -369,7 +416,7 @@ class MonitorLoop:
             if self.max_polls is not None and summary.polls >= self.max_polls:
                 break
             # Back off longer after errors to ride out transient API failures.
-            sleep_for = self.error_backoff_seconds if self._consecutive_errors or self._rate_limit_backoff_active else self.poll_seconds
+            sleep_for = self.error_backoff_seconds if self._consecutive_errors or self._rate_limit_backoff_active or self._service_unavailable_backoff_active else self.poll_seconds
             time.sleep(sleep_for)
         return summary
 

@@ -505,12 +505,13 @@ class WebullSandboxBroker:
         self._require_session()
         response = self.session.trade_client.account_v2.get_account_position(self._resolve_account_id())
         positions: dict[str, Position] = {}
-        for record in _payload_records(response):
+        for record in _payload_records(response, strict=True):
             symbol = str(record.get("symbol") or record.get("ticker") or "").upper()
-            if not symbol:
-                continue
+            quantity = _decimal_field(record, "quantity", "position", "qty")
+            if not symbol or symbol in positions or not quantity.is_finite() or quantity != quantity.to_integral_value():
+                raise RuntimeError("Invalid broker position response; account verification blocked")
             positions[symbol] = Position(
-                quantity=int(_decimal_field(record, "quantity", "position", "qty", default=Decimal("0"))),
+                quantity=int(quantity),
                 average_price=_decimal_field(
                     record, "average_price", "avg_price", "cost_price", "avg_cost", default=Decimal("0")
                 ),
@@ -747,6 +748,8 @@ class WebullSandboxBroker:
             self._resolve_account_id(), page_size=100
         )
         if response.status_code != 200:
+            if is_service_unavailable_error(response):
+                raise ServiceUnavailableError("Webull open-order verification returned HTTP 503")
             raise RuntimeError("Cannot verify server-side open orders; startup blocked")
         records = response.json()
         if not isinstance(records, list):
@@ -764,16 +767,26 @@ class WebullSandboxBroker:
             )
 
 
-def _payload_records(response: Any) -> list[dict[str, Any]]:
+def _payload_records(response: Any, *, strict: bool = False) -> list[dict[str, Any]]:
     status = getattr(response, "status_code", None)
     if status is not None and status != 200:
+        if is_service_unavailable_error(response):
+            raise ServiceUnavailableError("Webull API request failed with HTTP 503")
         raise RuntimeError(f"Webull API request failed with HTTP {status}")
     payload = response.json()
     if isinstance(payload, dict):
-        payload = payload.get("data", [])
+        payload = payload.get("data") if strict else payload.get("data", [])
     if not isinstance(payload, list):
+        if strict:
+            raise RuntimeError("Invalid broker position response; account verification blocked")
         return []
+    if strict and any(not isinstance(item, dict) for item in payload):
+        raise RuntimeError("Invalid broker position response; account verification blocked")
     return [item for item in payload if isinstance(item, dict)]
+
+
+class ServiceUnavailableError(RuntimeError):
+    status_code = 503
 
 
 def is_rate_limit_error(error: Exception) -> bool:
@@ -783,6 +796,15 @@ def is_rate_limit_error(error: Exception) -> bool:
     code = getattr(error, "error_code", getattr(error, "code", ""))
     text = f"{code} {error}".upper()
     return "TOO_MANY_REQUESTS" in text or "HTTP STATUS: 429" in text
+
+
+def is_service_unavailable_error(error: Any) -> bool:
+    status = getattr(error, "http_status", getattr(error, "status_code", None))
+    if status is not None:
+        return str(status) == "503"
+    code = getattr(error, "error_code", getattr(error, "code", ""))
+    text = f"{code} {error}".upper()
+    return "SERVICE_NOT_AVAILABLE" in text or "HTTP STATUS: 503" in text or "HTTP 503" in text
 
 
 def webull_error_code(error: Exception) -> str:

@@ -273,6 +273,20 @@ def test_webull_positions_map_from_sandbox() -> None:
     assert adapter.get_position("OTHER") is None
 
 
+@pytest.mark.parametrize("payload", [{}, None, [None], [{}], [{"symbol": "NIVF"}],
+                                    [{"symbol": "NIVF", "quantity": "0.5"}],
+                                    [{"symbol": "NIVF", "quantity": "NaN"}],
+                                    [{"symbol": "NIVF", "quantity": "1"}, {"symbol": "NIVF", "quantity": "2"}]])
+def test_webull_positions_reject_malformed_payloads(payload) -> None:
+    account_v2 = _FakeAccountV2(accounts=[{"account_id": "cfg-1"}])
+    account_v2.get_account_position = lambda account_id: _FakeResponse(payload)
+    adapter = WebullSandboxBroker(session=WebullSdkSession(
+        trade_client=_FakeTradeClient(account_v2), data_client=_FakeDataClient([]), account_id="cfg-1",
+    ))
+    with pytest.raises((RuntimeError, ValueError)):
+        adapter.get_positions()
+
+
 @pytest.mark.parametrize("account_type", ["CASH", "UNKNOWN", "MARGIN"])
 def test_webull_shorting_requires_confirmed_margin_account(account_type):
     session = WebullSdkSession(

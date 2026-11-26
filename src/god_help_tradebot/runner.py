@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import logging
 import signal
+import time
 from decimal import Decimal
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
 
-from .broker import WebullSandboxBroker
+from .broker import WebullSandboxBroker, is_service_unavailable_error
 from .config import BotConfig
 from .confirm import confirm_candidate
 from .monitor import LoopEvent, LoopSummary, MonitorLoop
@@ -43,7 +44,8 @@ def _log_events(logger: logging.Logger, summary: LoopSummary, seen: int,
                 review_loggers: dict[str, logging.Logger] | None = None) -> int:
     """Log new events since the last cycle; returns the new count."""
     for event in summary.events[seen:]:
-        logger.info("[%s] %s: %s", event.kind, event.symbol, event.detail)
+        log = logger.warning if event.kind == "service_unavailable_backoff" else logger.info
+        log("[%s] %s: %s", event.kind, event.symbol, event.detail)
         if review_loggers:
             channel = "all" if event.kind in ("trade_completed", "trade_performance_review") else (
                 "main" if event.kind.startswith("main_peak_") else
@@ -52,6 +54,32 @@ def _log_events(logger: logging.Logger, summary: LoopSummary, seen: int,
             if channel:
                 review_loggers[channel].info("[%s] %s: %s", event.kind, event.symbol, event.detail)
     return len(summary.events)
+
+
+class _StartupStopped(Exception):
+    pass
+
+
+def _retry_account_read(operation: Callable, logger: logging.Logger, stop_flag: Callable[[], bool] | None):
+    attempts = 0
+    while True:
+        try:
+            result = operation()
+            if attempts:
+                logger.info("[account_verification_recovered] startup account check succeeded")
+            return result
+        except Exception as error:
+            if not is_service_unavailable_error(error):
+                raise
+            if stop_flag and stop_flag():
+                raise _StartupStopped()
+            attempts += 1
+            delay = min(300.0, 30.0 * 2 ** min(attempts - 1, 4))
+            logger.warning("[service_unavailable_backoff] startup account verification unavailable; "
+                           "retrying after %.0fs; trading remains blocked", delay)
+            time.sleep(delay)
+            if stop_flag and stop_flag():
+                raise _StartupStopped()
 
 
 def run_bot(
@@ -82,16 +110,27 @@ def run_bot(
     broker = WebullSandboxBroker.from_env().connect()
     if not broker.sandbox_mode or broker.live_mode:
         raise RuntimeError("run_bot is sandbox-only; live mode is not enabled")
-    if config.allow_shorts:
-        broker.assert_margin_account()
     performance_store = None
-    if config.trade_review_enabled and isinstance(broker, WebullSandboxBroker):
-        performance_store = EquityPerformanceStore("equity_performance.json", broker._resolve_account_id())
-        logger.info("[trade_review_ready] sandbox: completed=%s reviewed=%s target=4/5 paused=%s",
-                len(performance_store.data["trades"]), performance_store.data["reviewed_count"], performance_store.data["paused"])
-        broker.assert_no_remote_open_orders(allowed_client_order_ids=performance_store.recovery_ids)
-    else:
-        broker.assert_no_remote_open_orders()
+    try:
+        if config.allow_shorts:
+            _retry_account_read(broker.assert_margin_account, logger, stop_flag)
+        if config.trade_review_enabled and isinstance(broker, WebullSandboxBroker):
+            account_id = _retry_account_read(broker._resolve_account_id, logger, stop_flag)
+            performance_store = EquityPerformanceStore("equity_performance.json", account_id)
+            logger.info("[trade_review_ready] sandbox: completed=%s reviewed=%s target=4/5 paused=%s",
+                    len(performance_store.data["trades"]), performance_store.data["reviewed_count"], performance_store.data["paused"])
+
+        def verify_startup_account():
+            if performance_store is not None:
+                broker.assert_no_remote_open_orders(allowed_client_order_ids=performance_store.recovery_ids)
+            else:
+                broker.assert_no_remote_open_orders()
+            broker.get_positions()
+
+        _retry_account_read(verify_startup_account, logger, stop_flag)
+    except _StartupStopped:
+        logger.info("stopping during startup account verification")
+        return LoopSummary()
     if config.daily_peak_mode and performance_store is None:
         raise RuntimeError("daily peak mode requires the persistent execution and review ledger")
     review_loggers = {}
@@ -174,14 +213,14 @@ def run_bot(
             if stop_requested["flag"] or (stop_flag and stop_flag()):
                 logger.info("stopping after %s polls", summary.polls)
                 break
-            if execution_controller is not None:
+            if execution_controller is not None and not loop._account_recovery_required:
                 try:
                     execution_controller.tick(loop, summary)
                     research_worker.tick(loop._base_config)
                 except Exception as error:
                     logger.warning("[research_wait] %s: research error; account execution continues", type(error).__name__)
             loop.run_once(summary)
-            if webull_history is not None:
+            if webull_history is not None and not loop._account_recovery_required:
                 try:
                     collection = webull_history.tick(loop)
                     if collection["status"] not in ("cooldown", "idle", "deferred_for_trading", "deferred_for_reconciliation"):
@@ -199,9 +238,8 @@ def run_bot(
             if max_polls is not None and summary.polls >= max_polls:
                 break
             _maybe_run_study(logger, config, data_dir, study_state_file, config_file)
-            import time
-
-            backoff = loop._consecutive_errors or getattr(loop, "_rate_limit_backoff_active", False)
+            backoff = (loop._consecutive_errors or getattr(loop, "_rate_limit_backoff_active", False)
+                       or getattr(loop, "_service_unavailable_backoff_active", False))
             interval = min(poll_seconds, 5.0) if config.daily_peak_mode and (loop.exit_plans or loop._pending_limit) else poll_seconds
             time.sleep(loop.error_backoff_seconds if backoff else interval)
     finally:
