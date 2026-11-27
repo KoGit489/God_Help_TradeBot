@@ -139,6 +139,89 @@ def test_remote_orders_block_unsafe_startup(payload, allowed) -> None:
             broker.assert_no_remote_open_orders()
 
 
+def test_remote_orders_block_untracked_order_on_second_page() -> None:
+    tracked = [{"client_order_id": f"tracked-{number}"} for number in range(100)]
+    calls = []
+
+    def get_order_open(account_id, page_size, last_client_order_id=None):
+        calls.append(last_client_order_id)
+        payload = tracked if last_client_order_id is None else [{"client_order_id": "untracked"}]
+        return SimpleNamespace(status_code=200, json=lambda: payload)
+
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker._resolve_account_id = lambda: "test-account"
+    broker.session = SimpleNamespace(trade_client=SimpleNamespace(
+        order_v3=SimpleNamespace(get_order_open=get_order_open)
+    ))
+    with pytest.raises(RuntimeError, match="startup blocked"):
+        broker.assert_no_remote_open_orders(allowed_client_order_ids=frozenset(item["client_order_id"] for item in tracked))
+    assert calls == [None, "tracked-99"]
+
+
+def _paged_order_broker(pages):
+    calls = []
+
+    def get_order_open(account_id, page_size, last_client_order_id=None):
+        calls.append(last_client_order_id)
+        status, payload = pages[len(calls) - 1]
+        return SimpleNamespace(status_code=status, json=lambda: payload)
+
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker._resolve_account_id = lambda: "test-account"
+    broker.session = SimpleNamespace(trade_client=SimpleNamespace(
+        order_v3=SimpleNamespace(get_order_open=get_order_open)
+    ))
+    return broker, calls
+
+
+def test_remote_orders_follow_short_pages_until_empty() -> None:
+    broker, calls = _paged_order_broker([
+        (200, [{"client_order_id": "first"}]),
+        (200, [{"client_order_id": "second"}]),
+        (200, []),
+    ])
+    broker.assert_no_remote_open_orders(allowed_client_order_ids=frozenset({"first", "second"}))
+    assert calls == [None, "first", "second"]
+
+
+@pytest.mark.parametrize("second_page", [
+    [{"client_order_id": "first"}],
+    [{"client_order_id": ""}],
+    [{"client_order_id": None}],
+    [{"client_order_id": []}],
+    [None],
+    {"data": []},
+])
+def test_remote_orders_block_malformed_or_repeated_pages(second_page) -> None:
+    broker, calls = _paged_order_broker([(200, [{"client_order_id": "first"}]), (200, second_page)])
+    with pytest.raises(RuntimeError, match="startup blocked"):
+        broker.assert_no_remote_open_orders(allowed_client_order_ids=frozenset({"first"}))
+    assert calls == [None, "first"]
+
+
+def test_remote_orders_later_page_503_remains_retryable() -> None:
+    from god_help_tradebot.broker import is_service_unavailable_error
+
+    broker, calls = _paged_order_broker([(200, [{"client_order_id": "first"}]), (503, None)])
+    with pytest.raises(RuntimeError) as error:
+        broker.assert_no_remote_open_orders(allowed_client_order_ids=frozenset({"first"}))
+    assert is_service_unavailable_error(error.value)
+    assert calls == [None, "first"]
+
+
+def test_remote_orders_block_when_page_limit_is_reached(monkeypatch) -> None:
+    from god_help_tradebot import broker as broker_module
+
+    monkeypatch.setattr(broker_module, "MAX_OPEN_ORDER_PAGES", 2)
+    broker, calls = _paged_order_broker([
+        (200, [{"client_order_id": "first"}]),
+        (200, [{"client_order_id": "second"}]),
+    ])
+    with pytest.raises(RuntimeError, match="pagination limit.*startup blocked"):
+        broker.assert_no_remote_open_orders(allowed_client_order_ids=frozenset({"first", "second"}))
+    assert calls == [None, "first"]
+
+
 @pytest.mark.parametrize("buying_power, expected", [(1_000_000, "$1000000.00"), (None, "unavailable")])
 def test_startup_reports_account_buying_power_before_polling(monkeypatch, tmp_path, caplog, buying_power, expected):
     broker = _Broker()

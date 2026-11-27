@@ -12,6 +12,13 @@ polling resumes. Unknown open orders, malformed position data, and other
 errors remain fail-closed. Background account research is deferred during
 recovery. Order submission errors are not treated as safe read-only retries.
 
+The legacy open-order query follows each `last_client_order_id` cursor until an
+empty page, and rejects repeated or malformed records, unavailable pages, and
+pagination exceeding 100 requests. Webull warns that this list can lag recent
+orders, so an empty result alone does not guarantee that no order exists.
+Reconcile uncertain or recently submitted orders directly with the sandbox
+account before starting or resuming; never rely solely on an empty list.
+
 Warnings are written to the bot logs; they are not external notifications.
 During an outage the bot may be unable to manage an existing position or
 working order. Check the sandbox account directly, and never assume it is flat

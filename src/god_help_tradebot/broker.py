@@ -76,6 +76,7 @@ EQUITY_INSTRUMENT = "EQUITY"
 NORMAL_COMBO = "NORMAL"
 QTY_ENTRUST = "QTY"
 VALID_TRADING_SESSIONS = {"CORE", "ALL", "NIGHT"}
+MAX_OPEN_ORDER_PAGES = 100
 
 WEBULL_ORDER_TYPES = {
     OrderType.MARKET: "MARKET",
@@ -744,21 +745,35 @@ class WebullSandboxBroker:
     def assert_no_remote_open_orders(self, *, allowed_client_order_ids: frozenset[str] = frozenset()) -> None:
         """Block startup rather than duplicate orders lost from the local cache."""
         self._require_session()
-        response = self.session.trade_client.order_v3.get_order_open(
-            self._resolve_account_id(), page_size=100
-        )
-        if response.status_code != 200:
-            if is_service_unavailable_error(response):
-                raise ServiceUnavailableError("Webull open-order verification returned HTTP 503")
-            raise RuntimeError("Cannot verify server-side open orders; startup blocked")
-        records = response.json()
-        if not isinstance(records, list):
-            raise RuntimeError("Unexpected open-order response; startup blocked")
-        if any(not isinstance(record, dict) or record.get("client_order_id") not in allowed_client_order_ids for record in records):
-            raise RuntimeError(
-                "Server-side working orders exist; startup blocked to prevent duplicates. "
-                "Resolve existing orders before restarting."
-            )
+        account_id = self._resolve_account_id()
+        cursor = None
+        seen_ids: set[str] = set()
+        for _page_index in range(MAX_OPEN_ORDER_PAGES):
+            params: dict[str, Any] = {"page_size": 100}
+            if cursor is not None:
+                params["last_client_order_id"] = cursor
+            response = self.session.trade_client.order_v3.get_order_open(account_id, **params)
+            if response.status_code != 200:
+                if is_service_unavailable_error(response):
+                    raise ServiceUnavailableError("Webull open-order verification returned HTTP 503")
+                raise RuntimeError("Cannot verify server-side open orders; startup blocked")
+            records = response.json()
+            if not isinstance(records, list):
+                raise RuntimeError("Unexpected open-order response; startup blocked")
+            if not records:
+                return
+            for record in records:
+                client_id = record.get("client_order_id") if isinstance(record, dict) else None
+                if not isinstance(client_id, str) or not client_id or client_id in seen_ids:
+                    raise RuntimeError("Invalid or repeated open-order page; startup blocked")
+                if client_id not in allowed_client_order_ids:
+                    raise RuntimeError(
+                        "Server-side working orders exist; startup blocked to prevent duplicates. "
+                        "Resolve existing orders before restarting."
+                    )
+                seen_ids.add(client_id)
+            cursor = client_id
+        raise RuntimeError("Open-order pagination limit reached; startup blocked")
 
     def _require_session(self) -> None:
         if self.session is None:
