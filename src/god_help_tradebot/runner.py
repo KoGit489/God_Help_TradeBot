@@ -146,7 +146,7 @@ def run_bot(
             handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
             review_logger.addHandler(handler)
             review_loggers[channel] = review_logger
-        logger.warning("[daily_peak_mode] sandbox only; no fixed TP/SL; deadline 23:59 Eastern overrides losses; "
+        logger.warning("[daily_peak_mode] sandbox only; no fixed TP/SL; deadline = last tradable Eastern minute per exchange calendar, overrides losses; "
                        "unsupported sessions defer exits; exact peaks and fills are not guaranteed")
 
     loop = MonitorLoop(
