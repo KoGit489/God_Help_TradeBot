@@ -34,6 +34,9 @@ class _FakeScreener:
     def list_gainers_losers(self, rank_type, category, sort_by, direction=None):
         return _FakeResponse(self._rows)
 
+    def list_most_active(self, category, rank_type, sort_by, direction=None):
+        return _FakeResponse(self._rows)
+
 
 class _FakeMarketData:
     def __init__(self, quotes: dict[str, Quote]) -> None:
@@ -148,6 +151,35 @@ def test_enrich_with_quotes_drops_symbols_without_quotes() -> None:
     snapshot = screener_row_to_snapshot(_row("GOW", 3.18, 1.98, 500_000, 2.5, 2.80, 3.40))
 
     assert enrich_with_quotes(broker, [snapshot]) == []
+
+
+def test_enrich_with_quotes_can_keep_screener_price_fallback_when_enabled() -> None:
+    broker = _broker([], {})
+    snapshot = screener_row_to_snapshot(_row("GOW", 3.18, 1.98, 500_000, 2.5, 2.80, 3.40))
+
+    enriched = enrich_with_quotes(broker, [snapshot], allow_price_fallback=True)
+
+    assert len(enriched) == 1
+    assert enriched[0].price == 3.18
+    assert enriched[0].bid == 3.18
+    assert enriched[0].ask == 3.18
+    assert enriched[0].live_quote_available is False
+
+
+def test_core_discovery_uses_screener_price_without_requesting_quotes() -> None:
+    from god_help_tradebot.autoscreen import discover_market_snapshots
+
+    row = _row("GOW", 3.18, 0.10, 500_000, 2.5, 2.80, 3.40)
+    broker = _broker([row], {})
+
+    result = discover_market_snapshots(
+        broker, BotConfig(min_change_percent=2.0), allow_shorts=False, allow_price_fallback=True,
+    )
+
+    assert [snapshot.symbol for snapshot in result.snapshots] == ["GOW"]
+    assert result.snapshots[0].price == 3.18
+    assert result.snapshots[0].live_quote_available is False
+    assert broker.session.data_client.market_data.batch_calls == 0
 
 
 def test_invalid_symbol_does_not_discard_valid_members_of_quote_batch():

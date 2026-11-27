@@ -1,4 +1,5 @@
 ﻿from datetime import datetime, time
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -13,6 +14,7 @@ from god_help_tradebot import (
     PaperBroker,
     Position,
     Quote,
+    WebullSandboxBroker,
 )
 from god_help_tradebot.monitor import LoopSummary
 from god_help_tradebot.screen import MarketSnapshot
@@ -159,6 +161,54 @@ def test_order_operation_503_is_not_treated_as_safe_account_read_retry():
     assert loop._consecutive_errors == 1
     assert not loop._service_unavailable_backoff_active
     assert result.events[-1].kind == "error"
+
+
+@pytest.mark.parametrize("quote", [None, Quote("TEST", Decimal("0"), Decimal("0"), Decimal("10"))])
+def test_missing_or_invalid_quote_uses_screen_price_during_core_market(quote):
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.get_latest_quote = lambda symbol: quote
+    loop = MonitorLoop(broker, now_provider=_open_market_now, flatten_before_close=False)
+    loop._discovery_cache = [_snapshot("TEST", 10.25, 9.0, 11.0)]
+
+    summary = LoopSummary()
+    assert loop._spread_ok_at_entry("TEST", summary)
+    assert loop._entry_quote is None
+    assert summary.events[-1].kind == "quote_fallback"
+    assert "10.2500" in summary.events[-1].detail
+
+
+def test_quote_fallback_does_not_apply_outside_core_market():
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.get_latest_quote = lambda symbol: None
+    loop = MonitorLoop(broker, now_provider=_night_session_now, flatten_before_close=False)
+    loop._discovery_cache = [_snapshot("TEST", 10.25, 9.0, 11.0)]
+
+    summary = LoopSummary()
+    assert not loop._spread_ok_at_entry("TEST", summary)
+    assert summary.events[-1].kind == "quote_rejected"
+
+
+def test_core_screener_price_fallback_skips_live_quote_request():
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.get_latest_quote = lambda symbol: pytest.fail("CORE fallback should not request a live quote")
+    loop = MonitorLoop(broker, now_provider=_open_market_now, flatten_before_close=False)
+    loop._discovery_cache = [replace(_snapshot("TEST", 10.25, 9.0, 11.0), live_quote_available=False)]
+
+    summary = LoopSummary()
+    assert loop._spread_ok_at_entry("TEST", summary)
+    assert summary.events[-1].kind == "quote_fallback"
+
+
+def test_valid_but_wide_live_quote_remains_rejected():
+    broker = WebullSandboxBroker.__new__(WebullSandboxBroker)
+    broker.get_latest_quote = lambda symbol: Quote("TEST", Decimal("9"), Decimal("11"), Decimal("10"))
+    loop = MonitorLoop(broker, BotConfig(max_spread_percent=1.0), now_provider=_open_market_now,
+                       flatten_before_close=False)
+    loop._discovery_cache = [_snapshot("TEST", 10.0, 9.0, 11.0)]
+
+    summary = LoopSummary()
+    assert not loop._spread_ok_at_entry("TEST", summary)
+    assert summary.events[-1].kind == "spread_rejected"
 
 
 def test_monitor_exits_at_target_price() -> None:

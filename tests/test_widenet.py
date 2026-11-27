@@ -119,10 +119,23 @@ def test_discovery_refresh_is_throttled_without_sleeping(monkeypatch) -> None:
     loop = MonitorLoop(broker, BotConfig(allow_shorts=True), now_provider=_open_now)
     loop._gather_snapshots()
     loop._gather_snapshots()
-    assert len(batches) == 2
+    assert batches == []
+    assert len(loop._discovery_cache) == 200
+    assert all(not snapshot.live_quote_available for snapshot in loop._discovery_cache)
     clock["now"] += 60
     loop._gather_snapshots()
-    assert len(batches) == 4
+    assert batches == []
+
+
+def test_non_core_discovery_keeps_executable_quote_requirement() -> None:
+    broker, batches = _wide_broker(overlap=True)
+    loop = MonitorLoop(broker, BotConfig(allow_shorts=True), now_provider=lambda: datetime(2026, 10, 7, 21, 0, tzinfo=EASTERN))
+
+    snapshots = loop._gather_snapshots()
+
+    assert len(batches) == 2
+    assert snapshots
+    assert all(snapshot.live_quote_available for snapshot in snapshots)
 
 
 # --- Alpha Vantage daily news cache ----------------------------------------------

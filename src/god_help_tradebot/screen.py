@@ -24,6 +24,7 @@ class MarketSnapshot:
     extended_price: float | None = None
     extended_change_ratio: float | None = None
     extended_volume: float | None = None
+    live_quote_available: bool = True
 
     @property
     def gap_percent(self) -> float | None:
@@ -43,6 +44,8 @@ class MarketSnapshot:
 
     @property
     def spread_percent(self) -> float:
+        if not self.live_quote_available:
+            return float("inf")
         spread = ((self.ask - self.bid) / self.price) * 100 if self.price else float("inf")
         return round(spread, 4)
 
@@ -89,7 +92,7 @@ def _passes_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
         and snapshot.volume >= config.min_average_volume
         and snapshot.relative_volume >= config.min_relative_volume
         and 0 < snapshot.bid <= snapshot.ask
-        and snapshot.spread_percent <= config.max_spread_percent
+        and (not snapshot.live_quote_available or snapshot.spread_percent <= config.max_spread_percent)
         and 0 <= snapshot.range_position <= 1
     )
 
@@ -170,7 +173,7 @@ def _passes_prepop_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
         and snapshot.volume >= config.min_average_volume
         and snapshot.relative_volume >= PREPOP_MIN_RELATIVE_VOLUME
         and 0 < snapshot.bid <= snapshot.ask
-        and snapshot.spread_percent <= config.max_spread_percent
+        and (not snapshot.live_quote_available or snapshot.spread_percent <= config.max_spread_percent)
         and 0 <= snapshot.range_position <= PREPOP_MAX_RANGE_POSITION
     )
 
@@ -182,7 +185,8 @@ def _prepop_score(snapshot: MarketSnapshot) -> float:
     coil = 1.0 - snapshot.range_position
     # Mild positive drift is a small plus; big pops are excluded by the filters.
     drift = min(max(snapshot.change_percent, 0.0) / PREPOP_MAX_CHANGE_PERCENT, 1.0)
-    return round((volume * 0.50) + (coil * 0.30) + (drift * 0.20), 4)
+    quote_penalty = 0.10 if not snapshot.live_quote_available else 0.0
+    return round(max(0.0, (volume * 0.50) + (coil * 0.30) + (drift * 0.20) - quote_penalty), 4)
 
 
 def best_candidate(
@@ -232,7 +236,7 @@ def _passes_fade_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
         and snapshot.change_percent >= FADE_MIN_CHANGE_PERCENT
         and snapshot.volume >= config.min_average_volume
         and 0 < snapshot.bid <= snapshot.ask
-        and snapshot.spread_percent <= config.max_spread_percent
+        and (not snapshot.live_quote_available or snapshot.spread_percent <= config.max_spread_percent)
         and 0 <= snapshot.range_position <= FADE_MAX_RANGE_POSITION
     )
 
@@ -271,7 +275,7 @@ def _passes_loser_filters(snapshot: MarketSnapshot, config: BotConfig) -> bool:
         and snapshot.volume >= config.min_average_volume
         and snapshot.relative_volume >= config.min_relative_volume
         and 0 < snapshot.bid <= snapshot.ask
-        and snapshot.spread_percent <= config.max_spread_percent
+        and (not snapshot.live_quote_available or snapshot.spread_percent <= config.max_spread_percent)
         and 0 <= snapshot.range_position <= LOSER_MAX_RANGE_POSITION
     )
 

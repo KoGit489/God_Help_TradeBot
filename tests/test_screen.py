@@ -76,6 +76,18 @@ def test_snapshot_metrics_are_transparent() -> None:
     assert candidate.range_position == 0.8
 
 
+def test_missing_quote_fallback_is_not_treated_as_zero_spread():
+    base = snapshot("LIVE", 10, 4, 0.2)
+    fallback = replace(base, symbol="FALLBACK", bid=base.price, ask=base.price, live_quote_available=False)
+
+    ranked = screen_candidates([fallback, base], BotConfig())
+
+    assert fallback.spread_percent == float("inf")
+    assert {candidate.snapshot.symbol for candidate in ranked} == {"LIVE", "FALLBACK"}
+    assert ranked[0].snapshot.symbol == "LIVE"
+    assert next(candidate.score for candidate in ranked if candidate.snapshot.symbol == "FALLBACK") < ranked[0].score
+
+
 # --- Explosive-potential ranking (same requirements, better leaderboard) ------
 
 

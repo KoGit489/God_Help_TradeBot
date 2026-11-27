@@ -69,6 +69,7 @@ def screener_row_to_snapshot(row: dict[str, Any]) -> MarketSnapshot | None:
         ask=price,
         day_low=_decimal_or_zero(row.get("low")) or price,
         day_high=_decimal_or_zero(row.get("high")) or price,
+        live_quote_available=False,
         open_price=open_price if isfinite(open_price) and open_price > 0 else None,
         previous_close=previous_close if isfinite(previous_close) and previous_close > 0 else None,
     )
@@ -132,6 +133,8 @@ def fetch_top_losers(broker: WebullSandboxBroker, limit: int = SCREENER_MAX_ROWS
 def enrich_with_quotes(
     broker: WebullSandboxBroker,
     snapshots: Iterable[MarketSnapshot],
+    *,
+    allow_price_fallback: bool = False,
 ) -> list[MarketSnapshot]:
     """Replace placeholder bid/ask with real quotes, fetched in batches of 100.
 
@@ -181,7 +184,17 @@ def enrich_with_quotes(
     enriched: list[MarketSnapshot] = []
     for snapshot in candidates:
         quote = quotes.get(snapshot.symbol)
-        if quote is None or quote.bid <= 0 or quote.ask <= 0:
+        if (
+            quote is None
+            or not all(value.is_finite() for value in (quote.bid, quote.ask, quote.last))
+            or quote.bid <= 0
+            or quote.ask < quote.bid
+            or quote.last <= 0
+        ):
+            if allow_price_fallback and isfinite(snapshot.price) and snapshot.price > 0:
+                enriched.append(replace(
+                    snapshot, bid=snapshot.price, ask=snapshot.price, live_quote_available=False,
+                ))
             continue
         session_fields = {}
         if getattr(broker, "daily_peak_mode", False):
@@ -202,6 +215,7 @@ def enrich_with_quotes(
         enriched.append(replace(
             snapshot,
             bid=float(quote.bid), ask=float(quote.ask),
+            live_quote_available=True,
             overnight_price=float(quote.overnight_price) if quote.overnight_price is not None else None,
             overnight_change_ratio=float(quote.overnight_change_ratio) if quote.overnight_change_ratio is not None else None,
             overnight_volume=float(quote.overnight_volume) if quote.overnight_volume is not None else None,
@@ -260,6 +274,7 @@ def discover_market_snapshots(
     *,
     allow_shorts: bool,
     quote_offset: int = 0,
+    allow_price_fallback: bool = False,
 ) -> DiscoveryResult:
     """Union supported rankings and rotate bounded quote batches after deduplication."""
     sources = [(fetch_top_gainers, rank) for rank in MOVER_RANKS]
@@ -291,7 +306,11 @@ def discover_market_snapshots(
     offset = quote_offset % len(eligible)
     rotated = eligible[offset:] + eligible[:offset]
     selected = rotated[:DISCOVERY_QUOTE_BATCHES * 100]
-    snapshots = enrich_with_quotes(broker, selected)
+    if allow_price_fallback:
+        snapshots = [replace(snapshot, bid=snapshot.price, ask=snapshot.price, live_quote_available=False)
+                     for snapshot in selected if isfinite(snapshot.price) and snapshot.price > 0]
+    else:
+        snapshots = enrich_with_quotes(broker, selected)
     return DiscoveryResult(snapshots, len(seen), len(eligible), (offset + len(selected)) % len(eligible))
 
 

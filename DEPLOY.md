@@ -24,6 +24,16 @@ During an outage the bot may be unable to manage an existing position or
 working order. Check the sandbox account directly, and never assume it is flat
 or clear its ledger merely because the service is waiting or restarting.
 
+During CORE hours, discovery uses screener prices without requesting batched
+quotes. Unknown liquidity receives no spread-based ranking bonus and a small
+pre-pop score penalty. The final per-symbol quote refresh is skipped for these
+fallback-priced candidates; `quote_fallback` records the estimated price used
+for sandbox market-order sizing. No executable spread is claimed for these
+entries. Paths that have an actual live quote still face the configured spread
+check. Exits still use quotes, and outside-hours entries still require
+executable quotes for limit pricing. Market fills can differ from the scan
+price; this fallback does not guarantee execution price or profitability.
+
 ## Calendar-Day Peak Workflow
 
 The installed `god-help-tradebot` command now enables `daily_peak_mode`.
@@ -37,11 +47,13 @@ enable this mode. Backtests retain their selected configuration.
   sessions. Weekends, holidays, unavailable sessions, short borrow, and
   symbol eligibility remain broker restrictions. Short entries/covers
   remain CORE-only; outside-hours short support is not assumed.
-- Regular-hours orders are market orders. Outside-hours orders are
+- Regular-hours orders are market orders. CORE discovery can use screened
+  prices without quote data, with unknown liquidity penalized in ranking.
+  Outside-hours orders are
   marketable limits with a 0.5% quote buffer and confirmed-cancel chasing,
   capped at another 0.5% from the original limit. Partial fills, fresh
   buying power, and recovery IDs are checked before replacements.
-  A fill is never guaranteed; missing/stale quotes block orders.
+  A fill is never guaranteed; outside-hours pricing still requires executable quotes.
 - Fixed 30% take-profit and 10% stop-loss execution is disabled in this
   mode. Their legacy configuration values remain only sizing inputs.
   Favorable quote extremes persist across restarts. Two adverse samples

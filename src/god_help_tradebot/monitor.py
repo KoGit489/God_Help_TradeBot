@@ -999,13 +999,16 @@ class MonitorLoop:
         result = discover_market_snapshots(
             self.broker, self.config, allow_shorts=self.allow_shorts,
             quote_offset=self._discovery_offset,
+            allow_price_fallback=self._core_session_open(),
         )
         self._discovery_at = time.monotonic()
         self._discovery_offset = result.next_offset
         self._discovery_cache = result.snapshots
         logging.getLogger("god_help_tradebot").info(
-            "[scan_summary] unique=%s price_eligible=%s quote_enriched=%s next_offset=%s",
-            result.unique_symbols, result.eligible_symbols, len(result.snapshots), result.next_offset,
+            "[scan_summary] unique=%s price_eligible=%s quote_enriched=%s price_fallback=%s next_offset=%s",
+            result.unique_symbols, result.eligible_symbols,
+            sum(snapshot.live_quote_available for snapshot in result.snapshots),
+            sum(not snapshot.live_quote_available for snapshot in result.snapshots), result.next_offset,
         )
         return self._discovery_cache
 
@@ -1816,16 +1819,43 @@ class MonitorLoop:
             )
 
     def _spread_ok_at_entry(self, symbol: str, summary: LoopSummary) -> bool:
-        """Re-check the live spread right before entry; quotes may have widened."""
+        """Use a CORE screener-price fallback or re-check an available live spread."""
         self._entry_quote = None
+        screen_snapshot = next(
+            (snapshot for snapshot in self._discovery_cache if snapshot.symbol == symbol),
+            None,
+        )
+        if (
+            isinstance(self.broker, WebullSandboxBroker)
+            and self._core_session_open()
+            and screen_snapshot is not None
+            and not screen_snapshot.live_quote_available
+            and Decimal(str(screen_snapshot.price)).is_finite()
+            and screen_snapshot.price > 0
+        ):
+            summary.events.append(LoopEvent(
+                "quote_fallback", symbol,
+                f"using screener price ${screen_snapshot.price:.4f} for CORE market order; live spread unavailable",
+            ))
+            return True
         quote = self.broker.get_latest_quote(symbol)
         if isinstance(self.broker, WebullSandboxBroker):
             if (
                 quote is None
+                or not quote.bid.is_finite()
+                or not quote.ask.is_finite()
+                or not quote.last.is_finite()
                 or quote.bid <= 0
                 or quote.ask < quote.bid
                 or quote.last <= 0
             ):
+                screen_price = screen_snapshot.price if screen_snapshot is not None else None
+                if self._core_session_open() and screen_price is not None and Decimal(str(screen_price)).is_finite() and screen_price > 0:
+                    summary.events.append(LoopEvent(
+                        "quote_fallback", symbol,
+                        f"live quote unavailable; using current screener price ${screen_price:.4f} for CORE market-order sizing; spread not rechecked",
+                    ))
+                    return True
                 summary.events.append(
                     LoopEvent("quote_rejected", symbol, "Webull quote is missing or has invalid bid/ask prices; no entry submitted")
                 )
