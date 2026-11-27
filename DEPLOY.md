@@ -42,7 +42,16 @@ enable this mode. Backtests retain their selected configuration.
 
 - The day is midnight through 23:59 America/New_York, including DST.
   Starting mid-day scans immediately; there is no invented wait for a
-  midnight that has already passed. No new entry is allowed at 23:59.
+  midnight that has already passed. The liquidation deadline is the last
+  tradable minute of that Eastern day, derived yearly from the exchange
+  calendar (plus `exchange_calendar.json` overrides): 23:59 when overnight
+  trading continues into a next-day session; 19:59 when the next day is a
+  weekend or holiday; 16:59 on 1:00 p.m. early-close days, whose late
+  session ends at 5:00 p.m. No new entry is allowed at or after it.
+- Every losing completed trade tightens entry gates one bounded step
+  (relative volume, required signals, spread, confirmation score). These
+  `loss_adaptive` gates persist across restarts and review resets, never
+  loosen exits, and pause new entries once every gate is at its limit.
 - Eligible long stocks can use pre-market, after-hours, and overnight
   sessions. Weekends, holidays, unavailable sessions, short borrow, and
   symbol eligibility remain broker restrictions. Short entries/covers
@@ -62,7 +71,7 @@ enable this mode. Backtests retain their selected configuration.
   recent trade-print orderflow when available, not invented orderflow.
 - Ordinary reversal exits are suppressed at an estimated loss. Market
   slippage, fees, and borrow costs can still produce a realized loss.
-  At 23:59 the deadline OVERRIDES that rule and requests liquidation,
+  At the daily deadline the bot OVERRIDES that rule and requests liquidation,
   including at a loss. Halts or unsupported sessions persist liquidation
   intent for the next eligible session; flatness is not guaranteed by
   the deadline. No new position opens until orders and fills reconcile.

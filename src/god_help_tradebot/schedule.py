@@ -15,13 +15,28 @@ def equity_order_session(now: datetime) -> str:
     if today is not None:
         if today.market_open <= now < today.market_close:
             return "CORE"
-        if time(4) <= now.time() < time(20):
+        if time(4) <= now.time() < extended_close(today):
             return "ALL"
         if now.time() < time(4):
             return "NIGHT"
     if now.time() >= time(20) and get_trading_session(now.date() + timedelta(days=1)) is not None:
         return "NIGHT"
     return "CLOSED"
+
+
+def extended_close(session: "TradingSession") -> time:
+    """Late trading ends at 5 p.m. on early-close days, otherwise 8 p.m."""
+    return time(17) if session.market_close.time() < time(16) else time(20)
+
+
+def last_trading_minute(day: date) -> datetime | None:
+    """Final tradable minute of an Eastern calendar day, derived from the exchange calendar."""
+    if get_trading_session(day + timedelta(days=1)) is not None:
+        return datetime.combine(day, time(23, 59), EASTERN)
+    session = get_trading_session(day)
+    if session is None:
+        return None
+    return datetime.combine(day, extended_close(session), EASTERN) - timedelta(minutes=1)
 
 
 @dataclass(frozen=True)

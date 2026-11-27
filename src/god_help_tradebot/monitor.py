@@ -19,7 +19,7 @@ from .config import BotConfig
 from .confirm import confirm_candidate, confirm_candidate_bearish
 from .paper import OrderSide, OrderStatus, OrderType, PaperOrder, Position, Quote
 from .risk import TradePlan, build_short_plan, build_trade_plan
-from .schedule import EASTERN, TradingSession, equity_order_session, get_trading_session
+from .schedule import EASTERN, TradingSession, equity_order_session, get_trading_session, last_trading_minute
 from .screen import (
     MarketSnapshot,
     ProfiledCandidate,
@@ -181,7 +181,11 @@ class MonitorLoop:
             if self.config.daily_peak_mode:
                 self.performance_store.start_daily_reviews(self._now())
             self.config = self.performance_store.effective_config(self._base_config)
-            self.min_confirmation_score = max(self._base_confirmation_score, self.performance_store.data["adaptive"].get("min_confirmation_score", 0))
+            self.min_confirmation_score = max(
+                self._base_confirmation_score,
+                self.performance_store.data["adaptive"].get("min_confirmation_score", 0),
+                self.performance_store.data.get("loss_adaptive", {}).get("min_confirmation_score", 0),
+            )
             for symbol, trade in self.performance_store.data["active"].items():
                 self._entry_fills[symbol] = Decimal(trade["entry_notional"]) / trade["entry_quantity"]
                 remaining = trade["entry_quantity"] - trade["exit_quantity"]
@@ -322,6 +326,10 @@ class MonitorLoop:
             for trade in completed:
                 summary.events.append(LoopEvent("trade_completed", trade["symbol"],
                                                 f"P&L ${trade['realized_pnl_usd']} [{trade['outcome']}]"))
+                refinement = trade.get("loss_refinement")
+                if refinement is not None:
+                    summary.events.append(LoopEvent("loss_refinement", trade["symbol"],
+                                                    f"tightened={refinement['changes']}; paused={refinement['paused']}"))
                 if trade.get("fallback") is True:
                     summary.events.append(LoopEvent("fallback_trade_completed", trade["symbol"],
                                                     f"P&L ${trade['realized_pnl_usd']} [{trade['outcome']}]"))
@@ -338,7 +346,11 @@ class MonitorLoop:
                                                     f"{review['wins']}/5 winners; target 4/5; tightened={review['changes']}; paused={review['paused']}; "
                                                     f"batch P&L={review.get('realized_pnl_usd', 'n/a')}; cumulative P&L={review.get('cumulative_pnl_usd', 'n/a')}"))
             self.config = self.performance_store.effective_config(self._base_config)
-            self.min_confirmation_score = max(self._base_confirmation_score, self.performance_store.data["adaptive"].get("min_confirmation_score", 0))
+            self.min_confirmation_score = max(
+                self._base_confirmation_score,
+                self.performance_store.data["adaptive"].get("min_confirmation_score", 0),
+                self.performance_store.data.get("loss_adaptive", {}).get("min_confirmation_score", 0),
+            )
         for symbol in self._filled_exits_pending_reconcile:
             position = positions.get(symbol)
             if position is None or position.quantity == 0:
@@ -786,7 +798,8 @@ class MonitorLoop:
         now = self._now()
         if self.config.daily_peak_mode:
             now = now.astimezone(EASTERN)
-            return (now.hour == 23 and now.minute >= 59) or any(
+            deadline = last_trading_minute(now.date())
+            return (deadline is not None and now >= deadline) or any(
                 plan.opened_day is not None and plan.opened_day < now.date().isoformat()
                 for plan in self.exit_plans.values()
             )

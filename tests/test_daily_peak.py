@@ -168,6 +168,28 @@ def test_loss_is_held_until_deadline_then_limit_exit_intent_survives_restart(tmp
     assert restored._at_flatten_time()
 
 
+@pytest.mark.parametrize("day, deadline", [
+    ("2026-11-24", "23:59"),  # Tuesday; overnight continues into Wednesday
+    ("2026-11-25", "19:59"),  # Thanksgiving eve; no overnight into the holiday
+    ("2026-11-27", "16:59"),  # early close; late trading ends at 5 p.m.
+    ("2026-12-24", "16:59"),  # early close before Christmas
+    ("2026-11-20", "19:59"),  # Friday
+    ("2026-11-22", "23:59"),  # Sunday overnight into Monday
+])
+def test_daily_peak_liquidation_deadline_follows_exchange_calendar(day, deadline):
+    loop = MonitorLoop(PaperBroker(1000), BotConfig(daily_peak_mode=True), flatten_before_close=True)
+    cutoff = datetime.fromisoformat(f"{day}T{deadline}").replace(tzinfo=EASTERN)
+    loop._now = lambda: cutoff - timedelta(minutes=1)
+    assert not loop._at_flatten_time()
+    loop._now = lambda: cutoff
+    assert loop._at_flatten_time()
+
+
+def test_early_close_after_hours_ends_at_5pm():
+    assert equity_order_session(datetime(2026, 11, 27, 16, 59, tzinfo=EASTERN)) == "ALL"
+    assert equity_order_session(datetime(2026, 11, 27, 17, 0, tzinfo=EASTERN)) == "CLOSED"
+
+
 def _close(ledger, number, profit, *, fallback=False):
     entry = PaperOrder(number * 2, "TEST", OrderSide.BUY, 1, OrderType.MARKET,
                        status=OrderStatus.FILLED, fill_price=Decimal("100"))
@@ -177,6 +199,26 @@ def _close(ledger, number, profit, *, fallback=False):
                             status=OrderStatus.FILLED, fill_price=Decimal(100 + profit))
     ledger.record_fill(exit_order, "EXIT", _now())
     return ledger.finalize({}, _now(), BotConfig(daily_peak_mode=True), 0.5)[0][0]
+
+
+def test_each_loss_tightens_and_persists_entry_gates_across_daily_reset(tmp_path):
+    path = tmp_path / "ledger.json"
+    ledger = EquityPerformanceStore(path, "account")
+    _close(ledger, 1, -1)
+    assert ledger.data["loss_adaptive"]["min_relative_volume"] == 2.25
+    assert ledger.data["loss_adaptive"]["min_signals_present"] == 3
+    assert ledger.data["loss_adaptive"]["max_spread_percent"] == 0.9
+    assert ledger.data["loss_adaptive"]["min_confirmation_score"] == 0.53
+    _close(ledger, 2, -1)
+    assert ledger.data["loss_adaptive"]["min_relative_volume"] == 2.5
+
+    ledger.start_daily_reviews(_now() + timedelta(days=1))
+    restored = EquityPerformanceStore(path, "account")
+    assert restored.data["loss_adaptive"]["min_relative_volume"] == 2.5
+    assert restored.data["loss_adaptive"]["min_signals_present"] == 4
+    assert restored.data["loss_adaptive"]["max_spread_percent"] == 0.8
+    assert restored.data["loss_adaptive"]["min_confirmation_score"] == 0.56
+    assert len(restored.data["loss_refinement_history"]) == 2
 
 
 def test_review_reset_preserves_execution_history_and_reserves_half_new_profits(tmp_path):

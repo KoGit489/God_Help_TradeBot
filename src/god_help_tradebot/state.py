@@ -98,6 +98,7 @@ class EquityPerformanceStore:
             "profit_reserve_usd": "0.00", "review_archives": [], "daily_reviews": None,
             "allocation": None,
             "execution_refinements": {"active": None, "history": [], "rejected": []},
+            "loss_adaptive": {}, "loss_refinement_history": [],
         }
         if self.path.exists():
             try:
@@ -150,11 +151,14 @@ class EquityPerformanceStore:
                 if any(trade.get("outcome") not in ("win", "loss", "flat") for trade in loaded["trades"]):
                     raise ValueError("invalid trade outcome")
                 allowed = {"min_relative_volume", "min_signals_present", "max_spread_percent", "min_confirmation_score"}
-                if not set(loaded["adaptive"]) <= allowed or any(
-                    not isinstance(value, (int, float)) or not Decimal(str(value)).is_finite() or value <= 0
-                    for value in loaded["adaptive"].values()
-                ):
-                    raise ValueError("invalid adaptive gates")
+                for gates in (loaded["adaptive"], self.data["loss_adaptive"]):
+                    if not isinstance(gates, dict) or not set(gates) <= allowed or any(
+                        not isinstance(value, (int, float)) or not Decimal(str(value)).is_finite() or value <= 0
+                        for value in gates.values()
+                    ):
+                        raise ValueError("invalid adaptive gates")
+                if not isinstance(self.data["loss_refinement_history"], list):
+                    raise ValueError("invalid loss refinement history")
                 for order in loaded["orders"].values():
                     if not isinstance(order, dict) or order["role"] not in ("ENTRY", "EXIT") or order["side"] not in ("BUY", "SELL", "SHORT") or not isinstance(order["quantity"], int) or order["quantity"] <= 0 or not order["symbol"]:
                         raise ValueError("invalid tracked order")
@@ -353,6 +357,8 @@ class EquityPerformanceStore:
                 self.data["profit_reserve_usd"] = str(
                     Decimal(self.data["profit_reserve_usd"]) + (pnl / 2).quantize(Decimal("0.01"))
                 )
+            if pnl < 0:
+                record["loss_refinement"] = self._refine_after_loss(record, now, config, min_confirmation)
             completed.append(record)
             del self.data["active"][symbol]
         recovered_fill_pause = (
@@ -473,8 +479,37 @@ class EquityPerformanceStore:
             new_reviews.append(review)
         return new_reviews
 
+    _GATE_RULES = {
+        "min_relative_volume": (0.25, 5.0), "min_signals_present": (1, 4),
+        "max_spread_percent": (-0.1, 0.3), "min_confirmation_score": (0.03, 0.90),
+    }
+
+    def _refine_after_loss(self, trade: dict[str, Any], now: datetime, config: BotConfig,
+                           min_confirmation: float) -> dict[str, Any]:
+        """Tighten entry gates one bounded step after every losing trade; survives restarts and review resets."""
+        gates = self.data["loss_adaptive"]
+        changes = {}
+        for name, (step, limit) in self._GATE_RULES.items():
+            current = gates.get(name, min_confirmation if name == "min_confirmation_score" else getattr(config, name))
+            updated = min(current + step, limit) if step > 0 else max(current + step, limit)
+            if updated != current:
+                changes[name] = round(updated, 4)
+        gates.update(changes)
+        if not changes:
+            self.data["paused"] = True
+            self.data["pause_reason"] = "Loss refinement reached all tightening limits; manual review required"
+        entry = {"trade_id": trade.get("trade_id"), "symbol": trade["symbol"], "refined_at": now.isoformat(),
+                 "realized_pnl_usd": trade["realized_pnl_usd"], "changes": changes, "paused": not changes}
+        self.data["loss_refinement_history"].append(entry)
+        return entry
+
     def effective_config(self, config: BotConfig) -> BotConfig:
         overrides = {name: value for name, value in self.data["adaptive"].items() if name != "min_confirmation_score"}
+        for name, value in self.data["loss_adaptive"].items():
+            if name == "min_confirmation_score":
+                continue
+            current = overrides.get(name, getattr(config, name))
+            overrides[name] = min(current, value) if name == "max_spread_percent" else max(current, value)
         return replace(config, **overrides)
 
     @property

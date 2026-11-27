@@ -386,7 +386,9 @@ def test_five_completed_trades_below_four_wins_tighten_picking(tmp_path):
         _, reviews = ledger.finalize({}, now, BotConfig(), 0.5)
         assert len(reviews) == (1 if number == 4 else 0)
     assert reviews[0]["wins"] == 3
-    assert ledger.effective_config(BotConfig()).min_relative_volume == 2.25
+    assert ledger.data["adaptive"]["min_relative_volume"] == 2.25
+    assert ledger.data["loss_adaptive"]["min_relative_volume"] == 2.5  # two losses, one step each
+    assert ledger.effective_config(BotConfig()).min_relative_volume == 2.5
     assert ledger.data["adaptive"]["min_confirmation_score"] == 0.53
     ledger = EquityPerformanceStore(ledger.path, "test-account")
     assert len(ledger.data["trades"]) == 5
