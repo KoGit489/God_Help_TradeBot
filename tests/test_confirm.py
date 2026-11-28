@@ -342,6 +342,31 @@ def test_exchange_closure_notice_accepts_two_pm_close(monkeypatch):
     assert notices[0].early_close == time(14, 0)
 
 
+def test_exchange_closure_notice_is_not_limited_to_fixed_years(monkeypatch):
+    import god_help_tradebot.news as news
+
+    news._MARKET_CLOSURE_CACHE.clear()
+    item = {
+        "title": "NYSE and Nasdaq will be closed on January 9, 2045 for a national day of mourning",
+        "summary": "U.S. stock market closure",
+        "source": "official nyse",
+        "url": "https://www.nyse.com/notices",
+    }
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"feed": [item]}
+
+    monkeypatch.setattr(news.requests, "get", lambda *args, **kwargs: Response())
+    notices = news.fetch_exchange_closure_notices(api_key="TEST")
+    assert [(notice.closed_date.isoformat(), notice.early_close) for notice in notices] == [("2045-01-09", None)]
+
+
 def test_news_sentiment_network_failure_is_neutral(monkeypatch) -> None:
     def _raise(*a, **k):
         raise RuntimeError("offline")

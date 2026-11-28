@@ -139,6 +139,7 @@ class MonitorLoop:
         # loop moves to the next candidate instead of retrying the same one.
         self._entry_blocked: set[str] = set()
         self._entry_blocked_date: Any | None = None
+        self._daily_limit_reported: Any | None = None
         # Symbol with an entry order in flight (submitted but not yet visible as
         # a position); prevents double-entering during the settlement gap.
         self._pending_entry: str | None = None
@@ -951,6 +952,8 @@ class MonitorLoop:
             return
         if not self._market_open() or self._in_entry_cooldown():
             return
+        if self._daily_trade_limit_reached(summary):
+            return
         if self.config.account_price_priority or self.config.full_account_allocation:
             buying_power = self._account_value()
             if buying_power is None or not Decimal(str(buying_power)).is_finite() or buying_power <= 0:
@@ -974,6 +977,29 @@ class MonitorLoop:
         if chosen is None:
             return
         self._enter(chosen, summary)
+
+    def _daily_trade_limit_reached(self, summary: LoopSummary) -> bool:
+        """True once ledger trades opened this Eastern day reach max_trades_per_day."""
+        limit = self.config.max_trades_per_day
+        if not self.config.daily_peak_mode or limit <= 0 or self.performance_store is None:
+            return False
+        from datetime import datetime
+
+        today = self._now().astimezone(EASTERN).date()
+        data = self.performance_store.data
+        opened = sum(
+            datetime.fromisoformat(trade["opened_at"]).astimezone(EASTERN).date() == today
+            for trade in [*data["trades"], *data["active"].values()]
+        )
+        if opened < limit:
+            return False
+        if self._daily_limit_reported != today:
+            self._daily_limit_reported = today
+            summary.events.append(LoopEvent(
+                "daily_trade_limit", "account",
+                f"{opened} trade(s) opened on {today.isoformat()} (limit {limit}); next entry after 00:00 Eastern",
+            ))
+        return True
 
     def _record(self, snapshots: list[MarketSnapshot]) -> None:
         """Persist this cycle's decision data for later study (best effort)."""

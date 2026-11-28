@@ -85,8 +85,7 @@ def _holidays(year: int) -> set[date]:
     new_year = _new_year_holiday(year)
     independence = _observed(date(year, 7, 4))
     christmas = _observed(date(year, 12, 25))
-    thanksgiving = date(year, 11, 1)
-    thanksgiving += timedelta(days=(3 - thanksgiving.weekday()) % 7 + 21)
+    thanksgiving = _thanksgiving(year)
     memorial = date(year, 5, 31)
     memorial -= timedelta(days=(memorial.weekday() - 0) % 7)
     labor = date(year, 9, 1)
@@ -115,31 +114,27 @@ def _holidays(year: int) -> set[date]:
     return {day for day in holidays if day.year == year}
 
 
+def _thanksgiving(year: int) -> date:
+    first = date(year, 11, 1)
+    return first + timedelta(days=(3 - first.weekday()) % 7 + 21)
+
+
 def _known_early_close_dates(year: int) -> set[date]:
-    dates = set()
+    """1 p.m. closes: the day after Thanksgiving, plus July 3 and December 24
+    when they fall Monday-Thursday. On a Friday those dates are the observed
+    Independence Day / Christmas holiday instead, so the market is closed."""
+    dates = {_thanksgiving(year) + timedelta(days=1)}
     for month, day in ((7, 3), (12, 24)):
         candidate = date(year, month, day)
-        if candidate.weekday() < 5:
+        if candidate.weekday() < 4:
             dates.add(candidate)
-    thanksgiving = date(year, 11, 1)
-    thanksgiving += timedelta(days=(3 - thanksgiving.weekday()) % 7 + 21)
-    thanksgiving_eve = thanksgiving + timedelta(days=1)
-    if thanksgiving_eve.weekday() < 5:
-        dates.add(thanksgiving_eve)
     return dates
 
 
 def _early_close(day: date) -> bool:
-    overrides = _load_override_calendar().get("early_close_dates", {})
-    if day.isoformat() in overrides:
+    if day.isoformat() in _load_override_calendar().get("early_close_dates", {}):
         return True
-    if day.weekday() == 4 and 22 <= day.day <= 28 and day.month == 11:
-        return True
-    if day.month == 12 and day.day == 24 and day.weekday() < 5:
-        return True
-    if day.month == 7 and day.day == 3 and day.weekday() < 5:
-        return True
-    return False
+    return day in _known_early_close_dates(day.year)
 
 
 def _exchange_calendar_path() -> Path:

@@ -47,7 +47,7 @@ def _log_events(logger: logging.Logger, summary: LoopSummary, seen: int,
         log = logger.warning if event.kind == "service_unavailable_backoff" else logger.info
         log("[%s] %s: %s", event.kind, event.symbol, event.detail)
         if review_loggers:
-            channel = "all" if event.kind in ("trade_completed", "trade_performance_review") else (
+            channel = "all" if event.kind in ("trade_completed", "trade_performance_review", "loss_refinement") else (
                 "main" if event.kind.startswith("main_peak_") else
                 "fallback" if event.kind.startswith("fallback_peak_") else None
             )

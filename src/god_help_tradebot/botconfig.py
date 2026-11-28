@@ -40,6 +40,7 @@ _TUNABLES = {
     "require_trend_alignment": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "allow_fallback": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "entry_cooldown_minutes": int,
+    "max_trades_per_day": int,
     "require_double_confirmation": lambda v: v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on"),
     "momentum_max_change_percent": float,
     "entry_limit_spread_fraction": float,

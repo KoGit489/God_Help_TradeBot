@@ -487,10 +487,34 @@ def test_review_loggers_route_only_their_own_events():
         logger.addHandler(logging.StreamHandler(stream))
         loggers[channel] = logger
     summary = LoopSummary(events=[LoopEvent("trade_completed", "TEST", "profit"),
+                                  LoopEvent("loss_refinement", "TEST", "tightened"),
                                   LoopEvent("main_peak_review", "account", "main"),
                                   LoopEvent("fallback_peak_result", "TEST", "fallback")])
     _log_events(logging.Logger("application"), summary, 0, loggers)
     assert "trade_completed" in streams["all"].getvalue()
+    assert "loss_refinement" in streams["all"].getvalue()
     assert "main_peak_review" in streams["main"].getvalue()
     assert "fallback_peak_result" in streams["fallback"].getvalue()
     assert "fallback" not in streams["main"].getvalue()
+
+
+def test_one_trade_per_eastern_day_still_reviews_close_then_resumes_next_day(tmp_path):
+    ledger = EquityPerformanceStore(tmp_path / "ledger.json", "account")
+    ledger.data["active"]["DONE"] = {
+        "trade_id": "t1", "symbol": "DONE", "direction": "long", "opened_at": "2026-11-24T00:30:00-05:00",
+        "entry_quantity": 10, "entry_notional": "100", "exit_quantity": 10, "exit_notional": "90", "daily_peak": True,
+    }
+    clock = {"now": datetime(2026, 11, 24, 23, tzinfo=EASTERN)}
+    scans = []
+    loop = MonitorLoop(PaperBroker(100000), BotConfig(daily_peak_mode=True), now_provider=lambda: clock["now"],
+                       performance_store=ledger, allow_entries=True, snapshot_provider=lambda: scans.append(clock["now"]) or [])
+    summary = LoopSummary()
+    loop.run_once(summary)
+    loop.run_once(summary)
+    kinds = [event.kind for event in summary.events]
+    assert kinds.count("trade_completed") == 1 and kinds.count("loss_refinement") == 1
+    assert kinds.count("daily_trade_limit") == 1
+    assert scans == []
+    clock["now"] = datetime(2026, 11, 25, 0, 1, tzinfo=EASTERN)
+    loop.run_once(summary)
+    assert scans == [clock["now"]]

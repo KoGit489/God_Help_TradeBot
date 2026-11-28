@@ -33,11 +33,24 @@ def test_verified_override_persists_and_controls_session(tmp_path, monkeypatch) 
     assert session.market_close.time() == time(13)
 
 
-def test_observed_independence_and_christmas_are_early_close_not_closed() -> None:
-    assert get_trading_session(date(2026, 7, 3)) is not None
-    assert get_trading_session(date(2026, 7, 3)).market_close.time() == time(13)
-    assert get_trading_session(date(2027, 12, 24)) is not None
-    assert get_trading_session(date(2027, 12, 24)).market_close.time() == time(13)
+def test_friday_observed_independence_and_christmas_are_closed() -> None:
+    # NYSE: Friday July 3, 2026 and Friday Dec 24, 2027 are observed holidays.
+    assert get_trading_session(date(2026, 7, 3)) is None
+    assert get_trading_session(date(2027, 12, 24)) is None
+    assert get_trading_session(date(2026, 7, 2)).market_close.time() == time(16)
+    assert get_trading_session(date(2027, 12, 23)).market_close.time() == time(16)
+
+
+def test_weekday_eves_of_independence_and_christmas_close_early() -> None:
+    assert get_trading_session(date(2028, 7, 3)).market_close.time() == time(13)
+    assert get_trading_session(date(2026, 12, 24)).market_close.time() == time(13)
+
+
+def test_black_friday_follows_thanksgiving_every_year() -> None:
+    # Thanksgiving 2030 is Nov 28, so the early close is Nov 29, not Nov 22.
+    assert get_trading_session(date(2030, 11, 28)) is None
+    assert get_trading_session(date(2030, 11, 29)).market_close.time() == time(13)
+    assert get_trading_session(date(2030, 11, 22)).market_close.time() == time(16)
 
 
 def test_known_early_close_has_1259_exit() -> None:

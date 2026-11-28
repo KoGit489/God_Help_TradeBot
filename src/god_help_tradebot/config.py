@@ -71,6 +71,9 @@ class BotConfig:
     study_auto_improve: bool = True
     trade_review_enabled: bool = True
     daily_peak_mode: bool = False
+    # Daily peak mode opens at most this many positions per Eastern calendar
+    # day (00:00-23:59), main and fallback combined. 0 removes the cap.
+    max_trades_per_day: int = 1
     peak_reversal_percent: float = 1.0
     peak_review_tolerance_percent: float = 1.0
     max_limit_slippage_percent: float = 0.5
@@ -127,6 +130,8 @@ class BotConfig:
             raise ValueError("min_signals_present must be between 0 and 5")
         if self.entry_cooldown_minutes < 0:
             raise ValueError("entry_cooldown_minutes cannot be negative")
+        if self.max_trades_per_day < 0:
+            raise ValueError("max_trades_per_day cannot be negative")
         if self.study_interval_days < 1:
             raise ValueError("study_interval_days must be at least 1")
         if self.study_target_winning_days < 1:

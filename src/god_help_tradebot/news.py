@@ -120,9 +120,9 @@ def fetch_exchange_closure_notices(
         return []
 
     notices: list[ExchangeClosureNotice] = []
-    iso_pattern = re.compile(r"\b(202[6-9]|203[0-2])-(\d{2})-(\d{2})\b")
+    iso_pattern = re.compile(r"\b(2\d{3})-(\d{2})-(\d{2})\b")
     month_names = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
-    month_pattern = re.compile(rf"\b({'|'.join(month_names)})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,)?\s+(202[6-9]|203[0-2])\b", re.IGNORECASE)
+    month_pattern = re.compile(rf"\b({'|'.join(month_names)})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,)?\s+(2\d{{3}})\b", re.IGNORECASE)
 
     for item in feed:
         if not isinstance(item, dict):
